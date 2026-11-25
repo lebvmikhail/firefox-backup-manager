@@ -26,6 +26,8 @@ $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
 $deleteDirectoryNoFollow = $programType.GetMethod("DeleteDirectoryNoFollow", $flags)
 $ensurePathHasNoReparsePoints = $programType.GetMethod("EnsurePathHasNoReparsePoints", $flags)
+$getSystemExecutablePath = $programType.GetMethod("GetSystemExecutablePath", $flags)
+$prepareBackupDestination = $programType.GetMethod("PrepareBackupDestination", $flags)
 $ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
@@ -66,6 +68,12 @@ if ($null -eq $deleteDirectoryNoFollow) {
 }
 if ($null -eq $ensurePathHasNoReparsePoints) {
     throw "EnsurePathHasNoReparsePoints method was not found in the application assembly."
+}
+if ($null -eq $getSystemExecutablePath) {
+    throw "GetSystemExecutablePath method was not found in the application assembly."
+}
+if ($null -eq $prepareBackupDestination) {
+    throw "PrepareBackupDestination method was not found in the application assembly."
 }
 if ($null -eq $removeScheduledTask) {
     throw "RemoveScheduledTask method was not found in the application assembly."
@@ -260,6 +268,28 @@ try {
         }
     }
 
+    # System utility resolution must ignore same-named binaries in the current directory.
+    $originalCurrentDirectory = [Environment]::CurrentDirectory
+    try {
+        [Environment]::CurrentDirectory = $testRoot
+        [System.IO.File]::WriteAllText((Join-Path $testRoot "schtasks.exe"), "not an executable")
+        [System.IO.File]::WriteAllText((Join-Path $testRoot "powershell.exe"), "not an executable")
+        $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+        $resolvedSchtasks = [string]$getSystemExecutablePath.Invoke([object]$null, [object[]]@("schtasks.exe"))
+        $resolvedPowerShell = [string]$getSystemExecutablePath.Invoke([object]$null, [object[]]@("WindowsPowerShell\v1.0\powershell.exe"))
+        if ([System.IO.Path]::GetFullPath($resolvedSchtasks) -ne [System.IO.Path]::GetFullPath((Join-Path $systemDirectory "schtasks.exe")) -or
+            [System.IO.Path]::GetFullPath($resolvedPowerShell) -ne [System.IO.Path]::GetFullPath((Join-Path $systemDirectory "WindowsPowerShell\v1.0\powershell.exe"))) {
+            throw "System executable resolution did not return paths under the Windows system directory."
+        }
+        if ($resolvedSchtasks.StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            $resolvedPowerShell.StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "A same-named executable in the writable working directory was selected."
+        }
+    }
+    finally {
+        [Environment]::CurrentDirectory = $originalCurrentDirectory
+    }
+
     # Reject a backup destination that is a junction into the source profile.
     $profileBackupTarget = Join-Path $profilePath "backup-target"
     New-Item -ItemType Directory -Path $profileBackupTarget -Force | Out-Null
@@ -270,6 +300,17 @@ try {
         throw "Could not create the backup destination junction."
     }
     try {
+        $prepareArguments = New-Object object[] 3
+        $prepareArguments[0] = [string]$backupJunction
+        $prepareArguments[1] = [string]""
+        $prepareArguments[2] = [string]""
+        $prepareResult = [bool]$prepareBackupDestination.Invoke([object]$null, $prepareArguments)
+        if ($prepareResult) {
+            throw "Destination preflight unexpectedly accepted a junction."
+        }
+        if (Test-Path -LiteralPath (Join-Path $profileBackupTarget "backup_log.txt")) {
+            throw "Destination preflight wrote a log through a junction before rejecting it."
+        }
         $aliasedBackup = Invoke-BackupEngine "Smoke Profile Ж" $profilePath $backupJunction "" $logPath
         if ($aliasedBackup.Success) {
             throw "Backup unexpectedly accepted a destination junction into the source profile."
