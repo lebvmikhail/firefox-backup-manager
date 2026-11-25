@@ -25,7 +25,8 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Xml;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Xml;
 
 class Program {
@@ -465,11 +466,86 @@ class Program {
         }
     }
 
+    static void ApplyPrivateDirectorySecurity(string directoryPath) {
+        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        SecurityIdentifier localSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        DirectorySecurity security = new DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(administrators);
+        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(localSystem, FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Allow));
+        Directory.SetAccessControl(directoryPath, security);
+    }
+
+    static void ApplyPrivateFileSecurity(string filePath) {
+        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        SecurityIdentifier localSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        FileSecurity security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(administrators);
+        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(localSystem, FileSystemRights.FullControl, AccessControlType.Allow));
+        File.SetAccessControl(filePath, security);
+    }
+
+    // Any local account that can read a DPAPI LocalMachine blob can decrypt it.
+    // The config file therefore relies on a protected DACL as a second boundary.
+    static bool EnsurePrivateConfigDirectory(string applicationDirectory,
+                                             out string configFile, out string error) {
+        string privateDirectory = Path.Combine(applicationDirectory, "PrivateConfig");
+        configFile = Path.Combine(privateDirectory, "config.ini");
+        error = "";
+        try {
+            Directory.CreateDirectory(privateDirectory);
+            if ((File.GetAttributes(privateDirectory) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("PrivateConfig не должен быть символической ссылкой или точкой соединения.");
+
+            ApplyPrivateDirectorySecurity(privateDirectory);
+            if (Directory.GetDirectories(privateDirectory).Length > 0)
+                throw new IOException("В PrivateConfig обнаружены вложенные каталоги. Удалите их вручную и повторите запуск.");
+
+            foreach (string existingFile in Directory.GetFiles(privateDirectory)) {
+                if ((File.GetAttributes(existingFile) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("В PrivateConfig обнаружена ссылка вместо обычного файла: " + Path.GetFileName(existingFile));
+                ApplyPrivateFileSecurity(existingFile);
+            }
+
+            string legacyConfig = Path.Combine(applicationDirectory, "config.ini");
+            if (File.Exists(legacyConfig)) {
+                if ((File.GetAttributes(legacyConfig) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Старый config.ini является ссылкой. Автоматическая миграция отменена.");
+
+                if (!File.Exists(configFile)) {
+                    string[] legacyLines = File.ReadAllLines(legacyConfig, Encoding.UTF8);
+                    string writeError;
+                    if (!WriteConfigAtomic(configFile, legacyLines, out writeError))
+                        throw new IOException("Не удалось перенести старую конфигурацию: " + writeError);
+                    ApplyPrivateFileSecurity(configFile);
+                }
+
+                ApplyPrivateFileSecurity(legacyConfig);
+                File.Delete(legacyConfig);
+                if (File.Exists(legacyConfig))
+                    throw new IOException("Старая конфигурация осталась на диске после попытки удаления.");
+            }
+
+            if (File.Exists(configFile)) ApplyPrivateFileSecurity(configFile);
+            return true;
+        } catch (Exception ex) {
+            error = "Не удалось защитить каталог конфигурации (PrivateConfig): " + ex.Message;
+            return false;
+        }
+    }
+
     [STAThread]
     static int Main(string[] args) {
         Application.EnableVisualStyles();
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
-        string configFile = Path.Combine(currentDir, "config.ini");
+        string configFile = Path.Combine(currentDir, "PrivateConfig", "config.ini");
         string executablePath = Path.Combine(currentDir, "Firefox_Backup_Manager.exe");
         bool protectedInstallLocation = IsProtectedProgramFilesLocation(executablePath);
         // РЕЖИМ 1: Фоновое резервное копирование при старте Windows.
@@ -478,6 +554,12 @@ class Program {
                 string unsafeTaskRemovalError;
                 RemoveScheduledTask(out unsafeTaskRemovalError);
                 return 8;
+            }
+            string privateConfigError;
+            if (!EnsurePrivateConfigDirectory(currentDir, out configFile, out privateConfigError)) {
+                string removalError;
+                RemoveScheduledTask(out removalError);
+                return 9;
             }
             if (!File.Exists(configFile)) return 2;
             string profName = "", profPath = "", backupDir = "", encryptedPass = "";
@@ -530,6 +612,15 @@ class Program {
                 "[{0}] [УСПЕХ] Резервное копирование завершено: {1}\r\n==================================================\r\n",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), createdArchive));
             return 0;
+        }
+
+        if (protectedInstallLocation) {
+            string privateConfigError;
+            if (!EnsurePrivateConfigDirectory(currentDir, out configFile, out privateConfigError)) {
+                MessageBox.Show(privateConfigError + "\n\nАвтозапуск не будет настроен, пока конфигурация не защищена.",
+                    "Ошибка защиты конфигурации", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 9;
+            }
         }
 
         // Remove an old SYSTEM task if its action still points to a user-writable path.

@@ -16,6 +16,7 @@ $createBackup = $programType.GetMethod("CreateBackup", $flags)
 $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 $isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation", $flags)
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
+$ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -28,6 +29,9 @@ if ($null -eq $isProtectedLocation) {
 }
 if ($null -eq $registerScheduledTask) {
     throw "RegisterScheduledTask method was not found in the application assembly."
+}
+if ($null -eq $ensurePrivateConfig) {
+    throw "EnsurePrivateConfigDirectory method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Tests " + [Guid]::NewGuid().ToString("N"))
@@ -107,6 +111,45 @@ try {
     }
     if (Test-Path -LiteralPath $insideProfile) {
         throw "The invalid destination folder was created inside the profile."
+    }
+
+    # Migrate legacy config.ini into a private directory and verify its DACL.
+    $configTestRoot = Join-Path $testRoot "Configuration ACL Test"
+    New-Item -ItemType Directory -Path $configTestRoot | Out-Null
+    $legacyConfig = Join-Path $configTestRoot "config.ini"
+    Set-Content -LiteralPath $legacyConfig -Value @("ProfileName=MigrationTest", "BackupPassword=DPAPI-TEST-BLOB") -Encoding UTF8
+
+    $configArguments = New-Object object[] 3
+    $configArguments[0] = [string]$configTestRoot
+    $configArguments[1] = [string]""
+    $configArguments[2] = [string]""
+    $configResult = [bool]$ensurePrivateConfig.Invoke([object]$null, $configArguments)
+    if (-not $configResult) {
+        throw "Private config ACL/migration failed: $($configArguments[2])"
+    }
+
+    $privateConfigPath = [string]$configArguments[1]
+    $privateConfigDirectory = Split-Path -Parent $privateConfigPath
+    if (-not (Test-Path -LiteralPath $privateConfigPath -PathType Leaf)) {
+        throw "Private config file was not created during migration."
+    }
+    if (Test-Path -LiteralPath $legacyConfig) {
+        throw "Legacy config.ini was not removed after migration."
+    }
+    if (-not (Select-String -LiteralPath $privateConfigPath -SimpleMatch "DPAPI-TEST-BLOB" -Quiet)) {
+        throw "The migrated private config does not contain the original settings."
+    }
+
+    $allowedConfigSids = @("S-1-5-18", "S-1-5-32-544")
+    foreach ($aclPath in @($privateConfigDirectory, $privateConfigPath)) {
+        $acl = Get-Acl -LiteralPath $aclPath
+        $rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+        foreach ($rule in $rules) {
+            if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+                $rule.IdentityReference.Value -notin $allowedConfigSids) {
+                throw "Private config ACL grants access to unexpected SID $($rule.IdentityReference.Value) on $aclPath."
+            }
+        }
     }
 
     # The SYSTEM task may only execute from the standard protected Program Files roots.
