@@ -22,6 +22,7 @@ $restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
 $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
 $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
+$deleteDirectoryNoFollow = $programType.GetMethod("DeleteDirectoryNoFollow", $flags)
 $ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
@@ -50,6 +51,9 @@ if ($null -eq $isSafeArchiveEntryPath) {
 }
 if ($null -eq $ensureFirefoxClosed) {
     throw "EnsureFirefoxClosed method was not found in the application assembly."
+}
+if ($null -eq $deleteDirectoryNoFollow) {
+    throw "DeleteDirectoryNoFollow method was not found in the application assembly."
 }
 if ($null -eq $removeScheduledTask) {
     throw "RemoveScheduledTask method was not found in the application assembly."
@@ -294,6 +298,26 @@ try {
     $deviceArchivePathArguments[2] = [string]""
     if ([bool]$isSafeArchiveEntryPath.Invoke([object]$null, $deviceArchivePathArguments)) {
         throw "Archive path validation accepted a reserved Windows console device name."
+    }
+
+    # Staging cleanup must remove a junction without deleting its external target.
+    $cleanupRoot = Join-Path $testRoot "Staging Cleanup Junction"
+    New-Item -ItemType Directory -Path $cleanupRoot -Force | Out-Null
+    $cleanupLink = Join-Path $cleanupRoot "external-link"
+    $cleanupTargetFile = Join-Path $junctionTarget "outside.txt"
+    $cleanupCommand = 'mklink /J "' + $cleanupLink + '" "' + $junctionTarget + '"'
+    & $env:ComSpec /c $cleanupCommand | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cleanupLink)) {
+        throw "Could not create the staging cleanup test junction."
+    }
+    $deleteArguments = New-Object object[] 1
+    $deleteArguments[0] = [string]$cleanupRoot
+    $null = $deleteDirectoryNoFollow.Invoke([object]$null, $deleteArguments)
+    if (Test-Path -LiteralPath $cleanupRoot) {
+        throw "No-follow staging cleanup did not remove the temporary directory."
+    }
+    if (-not (Test-Path -LiteralPath $cleanupTargetFile)) {
+        throw "No-follow staging cleanup deleted content outside the staging directory."
     }
 
     # Simulate an open Firefox process without launching the real browser.
@@ -573,6 +597,7 @@ try {
     Write-Host "PASS: encrypted archive with Unicode paths restored; wrong password rejected."
     Write-Host "PASS: archive path traversal, absolute paths, and reserved device names rejected."
     Write-Host "PASS: corrupted archive and wrong password fail without leaving staging folders."
+    Write-Host "PASS: staging cleanup deletes a junction itself without touching its external target."
     Write-Host "PASS: running firefox.exe blocks backup without terminating the process."
     Write-Host "PASS: SYSTEM startup task registers, runs the real background backup path, and removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
