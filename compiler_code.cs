@@ -694,6 +694,20 @@ class Program {
 
             string fullArchivePath = Path.GetFullPath(archivePath);
             string fullRestoreParent = Path.GetFullPath(restoreParent);
+
+            // Do not extract through a junction/symlink selected as the restore
+            // parent, and do not read the source archive through a reparse point.
+            // Validate before creating the staging directory or writing any log.
+            string pathValidationError;
+            if (!EnsurePathHasNoReparsePoints(fullRestoreParent, out pathValidationError)) {
+                error = "Каталог восстановления содержит файловую ссылку: " + pathValidationError;
+                return false;
+            }
+            if (!EnsurePathHasNoReparsePoints(fullArchivePath, out pathValidationError)) {
+                error = "Путь к архиву содержит файловую ссылку: " + pathValidationError;
+                return false;
+            }
+
             string zip7 = Find7Zip();
             if (string.IsNullOrEmpty(zip7)) {
                 error = "7-Zip не найден. Установите 7-Zip и повторите операцию.";
