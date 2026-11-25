@@ -976,7 +976,7 @@ class Program {
 
     // Old releases used the fixed task name Firefox_Local_AutoBackup and ran as SYSTEM.
     // The per-user task name is unique to the account and must use an interactive limited token.
-    static bool IsScheduledTaskUsingUnsafeSecurityContext(string taskName, bool requireCurrentUser) {
+    static bool IsTaskUsingUnsafeSecurityContext(string taskName, bool requireCurrentUser) {
         int exitCode; string output; string error;
         bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", taskName, "/XML"),
                                    30000, null, out exitCode, out output, out error);
@@ -1014,12 +1014,12 @@ class Program {
     }
 
     static bool IsScheduledTaskUsingUnsafeSecurityContext() {
-        return IsScheduledTaskUsingUnsafeSecurityContext(GetUserScheduledTaskName(), true);
+        return IsTaskUsingUnsafeSecurityContext(GetUserScheduledTaskName(), true);
     }
 
     static bool IsLegacySystemTaskRegistered() {
         if (!IsScheduledTaskRegistered(legacyRegKeyName)) return false;
-        return IsScheduledTaskUsingUnsafeSecurityContext(legacyRegKeyName, false);
+        return IsTaskUsingUnsafeSecurityContext(legacyRegKeyName, false);
     }
 
     static bool RemoveScheduledTask(out string error) {
