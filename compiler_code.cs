@@ -1109,6 +1109,9 @@ class Program {
         string temporary = configFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try {
             File.WriteAllLines(temporary, lines, Encoding.UTF8);
+            // A freshly written config must have its own protected DACL, not
+            // merely rely on inheritable ACEs from the PrivateConfig directory.
+            ApplyPrivateFileSecurity(temporary);
             if (File.Exists(configFile)) File.Replace(temporary, configFile, null);
             else File.Move(temporary, configFile);
             return true;
