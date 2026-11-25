@@ -386,6 +386,10 @@ class Program {
     }
 
     static bool RegisterScheduledTask(string exePath, out string error) {
+        if (!IsProtectedProgramFilesLocation(exePath)) {
+            error = "Задача запускается от SYSTEM, поэтому EXE должен находиться в защищённом каталоге Program Files. Переместите Firefox_Backup_Manager.exe в Program Files и запустите его от имени администратора.";
+            return false;
+        }
         int exitCode;
         string output;
         string taskName = regKeyName.Replace("'", "''");
