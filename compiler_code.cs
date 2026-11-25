@@ -282,7 +282,7 @@ class Program {
                 }
 
                 List<string> testArguments = new List<string>();
-                testArguments.Add("t"); testArguments.Add("-y");
+                testArguments.Add("t");
                 if (!string.IsNullOrEmpty(password)) {
                     testArguments.Add("-p");
                     testArguments.Add("-sccUTF-8");
