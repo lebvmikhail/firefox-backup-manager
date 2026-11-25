@@ -25,8 +25,6 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using System.Xml;
 
 class Program {
@@ -466,30 +464,39 @@ class Program {
         }
     }
 
+    static void RunIcacls(string path, string[] arguments) {
+        string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        string icacls = Path.Combine(systemDirectory, "icacls.exe");
+        if (!File.Exists(icacls)) throw new IOException("Не найден системный icacls.exe.");
+
+        string[] allArguments = new string[arguments.Length + 1];
+        allArguments[0] = path;
+        Array.Copy(arguments, 0, allArguments, 1, arguments.Length);
+
+        int exitCode; string output; string error;
+        bool launched = RunProcess(icacls, BuildCommandLine(allArguments), 30000, null,
+                                   out exitCode, out output, out error);
+        if (!launched || exitCode != 0)
+            throw new IOException("Не удалось применить ACL через icacls.exe. " +
+                                  (string.IsNullOrEmpty(error) ? output : error));
+    }
+
     static void ApplyPrivateDirectorySecurity(string directoryPath) {
-        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        SecurityIdentifier localSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-        DirectorySecurity security = new DirectorySecurity();
-        security.SetAccessRuleProtection(true, false);
-        security.SetOwner(administrators);
-        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None, AccessControlType.Allow));
-        security.AddAccessRule(new FileSystemAccessRule(localSystem, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None, AccessControlType.Allow));
-        Directory.SetAccessControl(directoryPath, security);
+        RunIcacls(directoryPath, new string[] { "/reset", "/Q" });
+        RunIcacls(directoryPath, new string[] {
+            "/inheritance:r", "/grant:r",
+            "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F",
+            "/setowner", "*S-1-5-32-544", "/Q"
+        });
     }
 
     static void ApplyPrivateFileSecurity(string filePath) {
-        SecurityIdentifier administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        SecurityIdentifier localSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-        FileSecurity security = new FileSecurity();
-        security.SetAccessRuleProtection(true, false);
-        security.SetOwner(administrators);
-        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-        security.AddAccessRule(new FileSystemAccessRule(localSystem, FileSystemRights.FullControl, AccessControlType.Allow));
-        File.SetAccessControl(filePath, security);
+        RunIcacls(filePath, new string[] { "/reset", "/Q" });
+        RunIcacls(filePath, new string[] {
+            "/inheritance:r", "/grant:r",
+            "*S-1-5-18:F", "*S-1-5-32-544:F",
+            "/setowner", "*S-1-5-32-544", "/Q"
+        });
     }
 
     // Any local account that can read a DPAPI LocalMachine blob can decrypt it.
