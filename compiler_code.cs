@@ -548,6 +548,123 @@ class Program {
         }
     }
 
+    static bool IsFullyQualifiedWindowsPath(string path) {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) return false;
+        string root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root) || root.Length < 3) return false;
+        return true;
+    }
+
+    static bool TryReadBackupConfig(string configPath,
+                                    out string profileName, out string profilePath,
+                                    out string backupDirectory, out string encryptedPassword,
+                                    out string error) {
+        profileName = "";
+        profilePath = "";
+        backupDirectory = "";
+        encryptedPassword = "";
+        error = "";
+
+        try {
+            FileInfo configInfo = new FileInfo(configPath);
+            if (!configInfo.Exists) {
+                error = "Файл конфигурации не найден.";
+                return false;
+            }
+            if (configInfo.Length <= 0 || configInfo.Length > 65536) {
+                error = "Размер конфигурации недопустим (ожидается от 1 байта до 64 КиБ).";
+                return false;
+            }
+
+            Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.Ordinal);
+            string[] lines = File.ReadAllLines(configPath, Encoding.UTF8);
+            foreach (string rawLine in lines) {
+                string line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal) ||
+                    line.StartsWith(";", StringComparison.Ordinal)) continue;
+
+                int separator = line.IndexOf('=');
+                if (separator <= 0) {
+                    error = "Обнаружена строка конфигурации без пары «ключ=значение».";
+                    return false;
+                }
+
+                string key = line.Substring(0, separator).Trim();
+                string value = line.Substring(separator + 1).Trim();
+                if (key != "ProfileName" && key != "ProfilePath" &&
+                    key != "BackupDir" && key != "BackupPassword") {
+                    error = "Обнаружен неизвестный ключ конфигурации: " + key;
+                    return false;
+                }
+                if (values.ContainsKey(key)) {
+                    error = "Обнаружен повторяющийся ключ конфигурации: " + key;
+                    return false;
+                }
+                values.Add(key, value);
+            }
+
+            string[] requiredKeys = new string[] {
+                "ProfileName", "ProfilePath", "BackupDir", "BackupPassword"
+            };
+            foreach (string key in requiredKeys) {
+                if (!values.ContainsKey(key)) {
+                    error = "В конфигурации отсутствует обязательный ключ: " + key;
+                    return false;
+                }
+            }
+
+            profileName = values["ProfileName"];
+            string rawProfilePath = values["ProfilePath"];
+            string rawBackupDirectory = values["BackupDir"];
+            encryptedPassword = values["BackupPassword"];
+
+            if (string.IsNullOrWhiteSpace(profileName) || profileName.Length > 256 ||
+                string.IsNullOrWhiteSpace(rawProfilePath) ||
+                string.IsNullOrWhiteSpace(rawBackupDirectory) ||
+                string.IsNullOrWhiteSpace(encryptedPassword)) {
+                error = "Одно или несколько обязательных значений конфигурации пусты или слишком длинные.";
+                return false;
+            }
+
+            if (!IsFullyQualifiedWindowsPath(rawProfilePath)) {
+                error = "Путь к профилю должен быть абсолютным (например, C:\\Users\\User\\Firefox\\Profiles\\...).";
+                return false;
+            }
+            if (!IsFullyQualifiedWindowsPath(rawBackupDirectory)) {
+                error = "Путь для резервных копий должен быть абсолютным.";
+                return false;
+            }
+
+            profilePath = Path.GetFullPath(rawProfilePath);
+            backupDirectory = Path.GetFullPath(rawBackupDirectory);
+            if (!Directory.Exists(profilePath)) {
+                error = "Каталог выбранного профиля Firefox не существует.";
+                return false;
+            }
+            if (File.Exists(backupDirectory)) {
+                error = "Путь для резервных копий указывает на файл, а не на каталог.";
+                return false;
+            }
+            if (IsPathSameOrInside(profilePath, backupDirectory)) {
+                error = "Каталог резервных копий не может находиться внутри профиля Firefox.";
+                return false;
+            }
+
+            byte[] protectedPassword = Convert.FromBase64String(encryptedPassword);
+            if (protectedPassword.Length == 0 || protectedPassword.Length > 16384) {
+                error = "DPAPI-значение пароля имеет недопустимый размер.";
+                return false;
+            }
+            return true;
+        } catch (FormatException) {
+            error = "Значение BackupPassword не является корректной строкой Base64.";
+            return false;
+        } catch (Exception ex) {
+            error = "Не удалось прочитать или проверить конфигурацию: " + ex.Message;
+            return false;
+        }
+    }
+
     [STAThread]
     static int Main(string[] args) {
         Application.EnableVisualStyles();
@@ -569,25 +686,9 @@ class Program {
                 return 9;
             }
             if (!File.Exists(configFile)) return 2;
-            string profName = "", profPath = "", backupDir = "", encryptedPass = "";
-            bool hasProfileName = false, hasProfilePath = false, hasBackupDir = false, hasPasswordKey = false;
-            try {
-                foreach (string line in File.ReadAllLines(configFile, Encoding.UTF8)) {
-                    if (line.StartsWith("ProfileName=", StringComparison.Ordinal)) {
-                        profName = line.Substring("ProfileName=".Length); hasProfileName = true;
-                    } else if (line.StartsWith("ProfilePath=", StringComparison.Ordinal)) {
-                        profPath = line.Substring("ProfilePath=".Length); hasProfilePath = true;
-                    } else if (line.StartsWith("BackupDir=", StringComparison.Ordinal)) {
-                        backupDir = line.Substring("BackupDir=".Length); hasBackupDir = true;
-                    } else if (line.StartsWith("BackupPassword=", StringComparison.Ordinal)) {
-                        encryptedPass = line.Substring("BackupPassword=".Length); hasPasswordKey = true;
-                    }
-                }
-            } catch { return 3; }
-
-            if (!hasProfileName || !hasProfilePath || !hasBackupDir || !hasPasswordKey ||
-                string.IsNullOrEmpty(profName) || string.IsNullOrEmpty(profPath) ||
-                string.IsNullOrEmpty(backupDir) || !Directory.Exists(profPath)) return 4;
+            string profName, profPath, backupDir, encryptedPass, configValidationError;
+            if (!TryReadBackupConfig(configFile, out profName, out profPath, out backupDir,
+                                     out encryptedPass, out configValidationError)) return 4;
 
             string logFile;
             try {
@@ -647,15 +748,14 @@ class Program {
         Label lblStatus = new Label() { Left = 20, Top = 20, Width = 400, Height = 60 };
         
         if (File.Exists(configFile)) {
-            string pN = "", bD = "";
-            string[] confLines = File.ReadAllLines(configFile, Encoding.UTF8);
-            foreach (string l in confLines) {
-                if (l.StartsWith("ProfileName=")) pN = l.Replace("ProfileName=", "").Trim();
-                if (l.StartsWith("BackupDir=")) bD = l.Replace("BackupDir=", "").Trim();
+            string pN, pP, bD, storedPassword, validationError;
+            if (TryReadBackupConfig(configFile, out pN, out pP, out bD, out storedPassword, out validationError)) {
+                bool taskRegistered = IsScheduledTaskRegistered();
+                lblStatus.Text = string.Format("Конфигурация: сохранена\nСтатус автозапуска: {0}\nПрофиль: {1}\nПапка сохранения: {2}",
+                    taskRegistered ? "ЗАДАЧА НАЙДЕНА" : "ЗАДАЧА НЕ НАЙДЕНА", pN, bD);
+            } else {
+                lblStatus.Text = "ОШИБКА КОНФИГУРАЦИИ: " + validationError;
             }
-            bool taskRegistered = IsScheduledTaskRegistered();
-            lblStatus.Text = string.Format("Конфигурация: сохранена\nСтатус автозапуска: {0}\nПрофиль: {1}\nПапка сохранения: {2}",
-                taskRegistered ? "ЗАДАЧА НАЙДЕНА" : "ЗАДАЧА НЕ НАЙДЕНА", pN, bD);
         } else {
             lblStatus.Text = "Статус автозапуска: НЕ НАСТРОЕН / ОТКЛЮЧЕН";
         }
