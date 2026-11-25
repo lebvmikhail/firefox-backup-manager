@@ -410,33 +410,33 @@ try {
     $firefoxPresentBeforeGuardTest = @(Get-Process -Name "firefox" -ErrorAction SilentlyContinue).Count -gt 0
     if (-not $firefoxPresentBeforeGuardTest) {
         $fakeFirefoxPath = Join-Path $testRoot "firefox.exe"
-    Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\cmd.exe") -Destination $fakeFirefoxPath
-    $fakeFirefox = Start-Process -FilePath $fakeFirefoxPath -ArgumentList @("/c", "ping -n 30 127.0.0.1 > nul") -PassThru -WindowStyle Hidden
-    try {
-        Start-Sleep -Milliseconds 500
-        $firefoxGuardArguments = New-Object object[] 1
-        $firefoxGuardArguments[0] = [string]""
-        if ([bool]$ensureFirefoxClosed.Invoke([object]$null, $firefoxGuardArguments)) {
-            throw "Backup was not blocked while a firefox.exe process was present."
+        Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\cmd.exe") -Destination $fakeFirefoxPath
+        $fakeFirefox = Start-Process -FilePath $fakeFirefoxPath -ArgumentList @("/c", "ping -n 30 127.0.0.1 > nul") -PassThru -WindowStyle Hidden
+        try {
+            Start-Sleep -Milliseconds 500
+            $firefoxGuardArguments = New-Object object[] 1
+            $firefoxGuardArguments[0] = [string]""
+            if ([bool]$ensureFirefoxClosed.Invoke([object]$null, $firefoxGuardArguments)) {
+                throw "Backup was not blocked while a firefox.exe process was present."
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$firefoxGuardArguments[0])) {
+                throw "Firefox process guard returned no diagnostic message."
+            }
+
+            $guardBackupPath = Join-Path $testRoot "Guarded Backup Output"
+            $guardArguments = [object[]]@("Smoke Profile Ж", $profilePath, $guardBackupPath, "", $logPath, "", "")
+            if ([bool]$createBackupWithGuard.Invoke([object]$null, $guardArguments)) {
+                throw "Production CreateBackup wrapper did not block while firefox.exe was running."
+            }
+            if (Test-Path -LiteralPath $guardBackupPath) {
+                throw "Production CreateBackup wrapper created output despite a running Firefox process."
+            }
         }
-        if ([string]::IsNullOrWhiteSpace([string]$firefoxGuardArguments[0])) {
-            throw "Firefox process guard returned no diagnostic message."
+        finally {
+            if (-not $fakeFirefox.HasExited) {
+                Stop-Process -Id $fakeFirefox.Id -Force -ErrorAction SilentlyContinue
+            }
         }
-    }
-        $guardBackupPath = Join-Path $testRoot "Guarded Backup Output"
-        $guardArguments = [object[]]@("Smoke Profile Ж", $profilePath, $guardBackupPath, "", $logPath, "", "")
-        if ([bool]$createBackupWithGuard.Invoke([object]$null, $guardArguments)) {
-            throw "Production CreateBackup wrapper did not block while firefox.exe was running."
-        }
-        if (Test-Path -LiteralPath $guardBackupPath) {
-            throw "Production CreateBackup wrapper created output despite a running Firefox process."
-        }
-    }
-    finally {
-        if (-not $fakeFirefox.HasExited) {
-            Stop-Process -Id $fakeFirefox.Id -Force -ErrorAction SilentlyContinue
-        }
-    }
     }
     else {
         $firefoxGuardArguments = New-Object object[] 1
