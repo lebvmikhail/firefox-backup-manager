@@ -313,6 +313,30 @@ try {
         }
     }
 
+    # A profile containing a directory junction must fail closed before 7-Zip starts.
+    $junctionTarget = Join-Path $testRoot "External Junction Target"
+    $junctionPath = Join-Path $profilePath "linked-external-data"
+    New-Item -ItemType Directory -Path $junctionTarget -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $junctionTarget "outside.txt") -Value "This file is outside the profile."
+    $junctionCommand = 'mklink /J "' + $junctionPath + '" "' + $junctionTarget + '"'
+    & $env:ComSpec /c $junctionCommand | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $junctionPath)) {
+        throw "Could not create the test directory junction."
+    }
+    try {
+        $junctionBackup = Invoke-BackupEngine "Smoke Profile Ж" $profilePath $backupPath "" $logPath
+        if ($junctionBackup.Success) {
+            throw "Backup unexpectedly accepted a profile containing a directory junction."
+        }
+        $archiveCountAfterJunction = @(Get-ChildItem -LiteralPath $backupPath -Filter "*.7z" -File).Count
+        if ($archiveCountAfterJunction -ne 2) {
+            throw "A failed junction check published an unexpected archive."
+        }
+    }
+    finally {
+        & $env:ComSpec /c ('rmdir "' + $junctionPath + '"') | Out-Null
+    }
+
     $insideProfile = Join-Path $profilePath "Backup Must Not Be Created Here"
     $invalid = Invoke-BackupEngine "SmokeProfile" $profilePath $insideProfile "" $logPath
     if ($invalid.Success) {
@@ -497,6 +521,7 @@ try {
     Write-Host "PASS: SYSTEM startup task registers with the expected action and settings, then removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
+    Write-Host "PASS: profile junctions are rejected before archiving."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
     Write-Host "PASS: retention removes expired managed archives and preserves unrelated .7z files."
 }
