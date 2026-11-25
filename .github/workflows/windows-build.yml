@@ -1,0 +1,55 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - development
+  pull_request:
+    branches:
+      - main
+      - development
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile Firefox Backup Manager
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compile with .NET Framework C# compiler
+        shell: pwsh
+        env:
+          CI: "true"
+        run: |
+          cmd /c compile.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "compile.bat failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify output and calculate SHA-256
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "Firefox_Backup_Manager.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Build output Firefox_Backup_Manager.exe was not created."
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
+          "$hash  Firefox_Backup_Manager.exe" |
+            Set-Content -Encoding ascii (Join-Path $env:GITHUB_WORKSPACE "SHA256SUMS.txt")
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Firefox-Backup-Manager-windows
+          path: |
+            Firefox_Backup_Manager.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
