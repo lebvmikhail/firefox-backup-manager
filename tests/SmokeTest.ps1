@@ -13,9 +13,13 @@ $assembly = [System.Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $E
 $programType = $assembly.GetType("Program", $true)
 $flags = [System.Reflection.BindingFlags]::Static -bor [System.Reflection.BindingFlags]::NonPublic
 $createBackup = $programType.GetMethod("CreateBackup", $flags)
+$retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
+}
+if ($null -eq $retainOldBackups) {
+    throw "RetainOldBackups method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Tests " + [Guid]::NewGuid().ToString("N"))
@@ -97,10 +101,29 @@ try {
         throw "The invalid destination folder was created inside the profile."
     }
 
+    # Retention must remove only files matching the application's own archive
+    # naming convention, never arbitrary user-created .7z files with the same prefix.
+    $oldManagedArchive = Join-Path $backupPath "SmokeProfile_2000-01-01_00-00-00_deadbeef.7z"
+    $oldManualArchive = Join-Path $backupPath "SmokeProfile_manual-export.7z"
+    Set-Content -LiteralPath $oldManagedArchive -Value "old managed archive placeholder"
+    Set-Content -LiteralPath $oldManualArchive -Value "user archive placeholder"
+    (Get-Item -LiteralPath $oldManagedArchive).LastWriteTime = (Get-Date).AddDays(-31)
+    (Get-Item -LiteralPath $oldManualArchive).LastWriteTime = (Get-Date).AddDays(-31)
+
+    $retainOldBackups.Invoke($null, [object[]]@("SmokeProfile", $backupPath, $logPath)) | Out-Null
+
+    if (Test-Path -LiteralPath $oldManagedArchive) {
+        throw "An old application-managed archive was not removed by retention."
+    }
+    if (-not (Test-Path -LiteralPath $oldManualArchive)) {
+        throw "Retention deleted an unrelated user-created .7z file."
+    }
+
     Write-Host "PASS: unencrypted archive created and passed 7-Zip integrity test."
     Write-Host "PASS: encrypted archive created and passed 7-Zip integrity test."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
+    Write-Host "PASS: retention removes expired managed archives and preserves unrelated .7z files."
 }
 catch {
     if (Test-Path -LiteralPath $logPath) {

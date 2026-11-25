@@ -23,6 +23,7 @@ using System.Diagnostics;
 using System.Windows.Forms;
 using System.Drawing;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Security.Cryptography;
 
 class Program {
@@ -317,13 +318,33 @@ class Program {
         }
     }
 
+    static bool IsManagedBackupFile(string fileName, string profileName) {
+        string prefix = MakeSafeFileName(profileName) + "_";
+        string baseName = Path.GetFileNameWithoutExtension(fileName);
+        if (!baseName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+
+        // The application writes: Profile_yyyy-MM-dd_HH-mm-ss_XXXXXXXX.7z
+        // Only this exact pattern is eligible for automatic retention deletion.
+        string suffix = baseName.Substring(prefix.Length);
+        if (suffix.Length != 28 || suffix[19] != '_') return false;
+
+        DateTime timestamp;
+        if (!DateTime.TryParseExact(suffix.Substring(0, 19), "yyyy-MM-dd_HH-mm-ss",
+                                    CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
+            return false;
+
+        string id = suffix.Substring(20);
+        for (int i = 0; i < id.Length; i++)
+            if (!Uri.IsHexDigit(id[i])) return false;
+        return true;
+    }
+
     static void RetainOldBackups(string profileName, string backupDir, string logFile) {
         try {
-            string prefix = MakeSafeFileName(profileName) + "_";
             DateTime cutoff = DateTime.Now.AddDays(-30);
             DirectoryInfo directory = new DirectoryInfo(backupDir);
             foreach (FileInfo file in directory.GetFiles("*.7z")) {
-                if (!file.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!IsManagedBackupFile(file.Name, profileName)) continue;
                 if (file.LastWriteTime < cutoff) {
                     try {
                         file.Delete();
