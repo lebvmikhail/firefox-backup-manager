@@ -102,6 +102,14 @@ try {
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
 }
+catch {
+    if (Test-Path -LiteralPath $logPath) {
+        Write-Host "----- Backup engine diagnostic log -----"
+        Get-Content -LiteralPath $logPath
+        Write-Host "----- End diagnostic log -----"
+    }
+    throw
+}
 finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
