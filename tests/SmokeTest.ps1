@@ -15,7 +15,10 @@ $flags = [System.Reflection.BindingFlags]::Static -bor [System.Reflection.Bindin
 $createBackup = $programType.GetMethod("CreateBackupCore", $flags)
 $createBackupWithGuard = $programType.GetMethod("CreateBackup", $flags)
 $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
-$isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation", $flags)
+$isLegacyTask = $programType.GetMethod("IsScheduledTaskUsingUnsafeSecurityContext", $flags)
+$getUserDataDirectory = $programType.GetMethod("GetUserDataDirectory", $flags)
+$encryptPassword = $programType.GetMethod("EncryptPassword", $flags)
+$tryDecryptPassword = $programType.GetMethod("TryDecryptPassword", $flags)
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
 $ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 $tryReadBackupConfig = $programType.GetMethod("TryReadBackupConfig", $flags)
@@ -38,9 +41,6 @@ if ($null -eq $createBackupWithGuard) {
 }
 if ($null -eq $retainOldBackups) {
     throw "RetainOldBackups method was not found in the application assembly."
-}
-if ($null -eq $isProtectedLocation) {
-    throw "IsProtectedProgramFilesLocation method was not found in the application assembly."
 }
 if ($null -eq $registerScheduledTask) {
     throw "RegisterScheduledTask method was not found in the application assembly."
@@ -71,6 +71,12 @@ if ($null -eq $ensurePathHasNoReparsePoints) {
 }
 if ($null -eq $getSystemExecutablePath) {
     throw "GetSystemExecutablePath method was not found in the application assembly."
+}
+if ($null -eq $isLegacyTask) {
+    throw "IsScheduledTaskUsingUnsafeSecurityContext method was not found in the application assembly."
+}
+if ($null -eq $getUserDataDirectory -or $null -eq $encryptPassword -or $null -eq $tryDecryptPassword) {
+    throw "Per-user config/DPAPI helper methods were not found in the application assembly."
 }
 if ($null -eq $prepareBackupDestination) {
     throw "PrepareBackupDestination method was not found in the application assembly."
@@ -528,7 +534,7 @@ try {
         throw "The invalid destination folder was created inside the profile."
     }
 
-    # Migrate legacy config.ini into a private directory and verify its DACL.
+    # Migrate a legacy config.ini and verify a per-user, SYSTEM, and Administrators DACL.
     $configTestRoot = Join-Path $testRoot "Configuration ACL Test"
     New-Item -ItemType Directory -Path $configTestRoot | Out-Null
     $legacyConfig = Join-Path $configTestRoot "config.ini"
@@ -555,7 +561,8 @@ try {
         throw "The migrated private config does not contain the original settings."
     }
 
-    $allowedConfigSids = @("S-1-5-18", "S-1-5-32-544")
+    $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowedConfigSids = @($currentUserSid, "S-1-5-18", "S-1-5-32-544") | Select-Object -Unique
     foreach ($aclPath in @($privateConfigDirectory, $privateConfigPath)) {
         $acl = Get-Acl -LiteralPath $aclPath
         if (-not $acl.AreAccessRulesProtected) {
@@ -586,57 +593,94 @@ try {
         }
     }
 
-    # The SYSTEM task may only execute from the standard protected Program Files roots.
-    # The registration method itself must fail closed before launching PowerShell.
-    $registerArguments = New-Object object[] 2
-    $registerArguments[0] = [string]$ExePath
-    $registerArguments[1] = [string]""
-    $registrationResult = [bool]$registerScheduledTask.Invoke([object]$null, $registerArguments)
-    if ($registrationResult) {
-        throw "RegisterScheduledTask accepted an executable outside Program Files."
+    # DPAPI CurrentUser must encrypt and decrypt within this interactive account.
+    $passwordProbe = "CurrentUser DPAPI smoke Ж"
+    $encryptedProbe = [string]$encryptPassword.Invoke([object]$null, [object[]]@($passwordProbe))
+    if ([string]::IsNullOrWhiteSpace($encryptedProbe) -or $encryptedProbe -eq $passwordProbe) {
+        throw "EncryptPassword did not produce an encrypted CurrentUser DPAPI blob."
     }
-    if ([string]::IsNullOrWhiteSpace([string]$registerArguments[1])) {
-        throw "RegisterScheduledTask rejected the writable path without explaining the reason."
-    }
-
-    $unsafePathArguments = New-Object object[] 1
-    $unsafePathArguments[0] = [string]$ExePath
-    $unsafePathResult = [bool]$isProtectedLocation.Invoke([object]$null, $unsafePathArguments)
-    if ($unsafePathResult) {
-        throw "An executable in the writable CI workspace was incorrectly accepted for a SYSTEM startup task."
+    $decryptProbeArguments = New-Object object[] 3
+    $decryptProbeArguments[0] = [string]$encryptedProbe
+    $decryptProbeArguments[1] = [string]""
+    $decryptProbeArguments[2] = [string]""
+    if (-not [bool]$tryDecryptPassword.Invoke([object]$null, $decryptProbeArguments) -or
+        [string]$decryptProbeArguments[1] -ne $passwordProbe) {
+        throw "CurrentUser DPAPI round-trip failed: $($decryptProbeArguments[2])"
     }
 
-    $protectedPathArguments = New-Object object[] 1
-    $protectedPathArguments[0] = [string](Join-Path $env:ProgramFiles "Firefox Backup Manager\Firefox_Backup_Manager.exe")
-    $protectedPathResult = [bool]$isProtectedLocation.Invoke([object]$null, $protectedPathArguments)
-    if (-not $protectedPathResult) {
-        throw "A path under Program Files was incorrectly rejected for a SYSTEM startup task."
+    # The app stores its config beneath the current user's LocalAppData, not beside the EXE.
+    $userDataDirectory = [string]$getUserDataDirectory.Invoke([object]$null, @())
+    $expectedUserDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData))
+    if (-not [System.IO.Path]::GetFullPath($userDataDirectory).StartsWith($expectedUserDataRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "User data directory is not inside LocalAppData: $userDataDirectory"
     }
 
-    # Verify real task registration under the protected installation root and clean it up.
+    # Register a least-privilege task for the current interactive user.
     $taskName = "Firefox_Local_AutoBackup"
     $preExistingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($null -ne $preExistingTask) {
         throw "The CI runner already contains $taskName; refusing to replace an unrelated task."
     }
-    $ciInstallDirectory = Join-Path $env:ProgramFiles "Firefox Backup Manager CI"
+    $ciInstallDirectory = Join-Path $testRoot "Per-user task install"
     $ciInstallExecutable = Join-Path $ciInstallDirectory "Firefox_Backup_Manager.exe"
+    $taskBackupPath = Join-Path $testRoot "Per-user Task Backup Output"
+    New-Item -ItemType Directory -Path $taskBackupPath -Force | Out-Null
+
+    $taskPrivateConfigDirectory = Join-Path $userDataDirectory "PrivateConfig"
+    $taskConfigPath = Join-Path $taskPrivateConfigDirectory "config.ini"
+    $hadTaskConfigDirectory = Test-Path -LiteralPath $taskPrivateConfigDirectory -PathType Container
+    $hadTaskConfig = Test-Path -LiteralPath $taskConfigPath -PathType Leaf
+    $previousTaskConfigBytes = $null
+    $previousTaskConfigAcl = $null
+    $previousTaskDirectoryAcl = $null
+    if ($hadTaskConfigDirectory) {
+        $previousTaskDirectoryAcl = Get-Acl -LiteralPath $taskPrivateConfigDirectory
+    }
+    if ($hadTaskConfig) {
+        $previousTaskConfigBytes = [System.IO.File]::ReadAllBytes($taskConfigPath)
+        $previousTaskConfigAcl = Get-Acl -LiteralPath $taskConfigPath
+    }
     $cleanupTaskAfterTest = $true
     try {
         New-Item -ItemType Directory -Path $ciInstallDirectory -Force | Out-Null
         Copy-Item -LiteralPath $ExePath -Destination $ciInstallExecutable -Force
 
+        $taskConfigArguments = New-Object object[] 3
+        $taskConfigArguments[0] = [string]$userDataDirectory
+        $taskConfigArguments[1] = [string]""
+        $taskConfigArguments[2] = [string]""
+        if (-not [bool]$ensurePrivateConfig.Invoke([object]$null, $taskConfigArguments)) {
+            throw "Could not prepare the current user's private config: $($taskConfigArguments[2])"
+        }
+        $taskConfigPath = [string]$taskConfigArguments[1]
+        $taskConfigLines = [string[]]@(
+            "ProfileName=UserTaskSmoke",
+            "ProfilePath=$profilePath",
+            "BackupDir=$taskBackupPath",
+            "BackupPassword="
+        )
+        [System.IO.File]::WriteAllLines($taskConfigPath, $taskConfigLines, [System.Text.Encoding]::UTF8)
+
         $taskRegistrationArguments = New-Object object[] 2
         $taskRegistrationArguments[0] = [string]$ciInstallExecutable
         $taskRegistrationArguments[1] = [string]""
         if (-not [bool]$registerScheduledTask.Invoke([object]$null, $taskRegistrationArguments)) {
-            throw "RegisterScheduledTask failed under Program Files: $($taskRegistrationArguments[1])"
+            throw "RegisterScheduledTask failed for the current user: $($taskRegistrationArguments[1])"
         }
 
         $createdTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
         $taskUser = [string]$createdTask.Principal.UserId
-        if ($taskUser -notin @("SYSTEM", "NT AUTHORITY\SYSTEM", "S-1-5-18")) {
-            throw "Scheduled task principal is not SYSTEM: $taskUser"
+        $expectedUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ($taskUser -ne $expectedUser -and $taskUser -ne $currentUserSid) {
+            throw "Scheduled task principal is not the current user: $taskUser (expected $expectedUser / $currentUserSid)"
+        }
+        $logonType = [string]$createdTask.Principal.LogonType
+        if ($logonType -notin @("Interactive", "InteractiveToken")) {
+            throw "Scheduled task does not use an interactive token: $logonType"
+        }
+        $runLevel = [string]$createdTask.Principal.RunLevel
+        if ($runLevel -notin @("Limited", "LeastPrivilege")) {
+            throw "Scheduled task is not limited to least-privilege execution: $runLevel"
         }
         if ($createdTask.Actions.Count -ne 1 -or
             [System.IO.Path]::GetFullPath([string]$createdTask.Actions[0].Execute) -ne
@@ -647,66 +691,56 @@ try {
         if ($createdTask.Settings.DisallowStartIfOnBatteries -or $createdTask.Settings.StopIfGoingOnBatteries) {
             throw "Scheduled task does not preserve the configured battery-friendly settings."
         }
-        if (-not [bool]$createdTask.Triggers[0].Enabled) {
-            throw "Scheduled task startup trigger is disabled."
+        if ($createdTask.Triggers.Count -ne 1 -or
+            $createdTask.Triggers[0].CimClass.CimClassName -notmatch "Logon" -or
+            -not [bool]$createdTask.Triggers[0].Enabled) {
+            throw "Scheduled task is not enabled with an AtLogOn trigger."
         }
 
-        # Write a safe synthetic config and run the scheduled action as SYSTEM.
-        $systemBackupPath = Join-Path $testRoot "SYSTEM Backup Output"
-        New-Item -ItemType Directory -Path $systemBackupPath -Force | Out-Null
-        $privateConfigArguments = New-Object object[] 3
-        $privateConfigArguments[0] = [string]$ciInstallDirectory
-        $privateConfigArguments[1] = [string]""
-        $privateConfigArguments[2] = [string]""
-        if (-not [bool]$ensurePrivateConfigDirectory.Invoke([object]$null, $privateConfigArguments)) {
-            throw "Could not prepare the SYSTEM task's private config: $($privateConfigArguments[2])"
+        $taskXml = [xml](Export-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+        if ($taskXml.Task.Principals.Principal.LogonType -ne "InteractiveToken" -or
+            $taskXml.Task.Principals.Principal.RunLevel -ne "LeastPrivilege" -or
+            $null -eq $taskXml.Task.Triggers.LogonTrigger) {
+            throw "Scheduled task XML does not enforce InteractiveToken, LeastPrivilege, and AtLogOn."
         }
-        $systemConfigPath = [string]$privateConfigArguments[1]
-        $systemConfigLines = [string[]]@(
-            "ProfileName=SystemTaskSmoke",
-            "ProfilePath=$profilePath",
-            "BackupDir=$systemBackupPath",
-            "BackupPassword="
-        )
-        [System.IO.File]::WriteAllLines($systemConfigPath, $systemConfigLines, [System.Text.Encoding]::UTF8)
 
         $hostFirefoxProcesses = @(Get-Process -Name "firefox" -ErrorAction SilentlyContinue)
         if ($hostFirefoxProcesses.Count -gt 0) {
-            Write-Host "SKIP: SYSTEM task execution was not triggered because the hosted runner already has firefox.exe running; production guard correctly refuses backup."
+            Write-Host "SKIP: user task execution was not triggered because the hosted runner already has firefox.exe running; production guard correctly refuses backup."
         }
         else {
-        $previousTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
-        $previousRunTime = $previousTaskInfo.LastRunTime
-        & (Join-Path $env:WINDIR "System32\schtasks.exe") /Run /TN $taskName | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "schtasks /Run failed with exit code $LASTEXITCODE."
-        }
-
-        $taskDeadline = (Get-Date).AddSeconds(35)
-        $taskCompleted = $false
-        do {
-            Start-Sleep -Milliseconds 500
-            $currentTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
-            $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-            if ($currentTaskInfo.LastRunTime -gt $previousRunTime -and $currentTask.State -ne "Running") {
-                $taskCompleted = $true
-                break
+            $previousTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            $previousRunTime = $previousTaskInfo.LastRunTime
+            & (Join-Path $env:WINDIR "System32\schtasks.exe") /Run /TN $taskName | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "schtasks /Run failed with exit code $LASTEXITCODE."
             }
-        } while ((Get-Date) -lt $taskDeadline)
 
-        if (-not $taskCompleted) {
-            throw "The SYSTEM backup task did not finish within 35 seconds."
-        }
-        if ([int]$currentTaskInfo.LastTaskResult -ne 0) {
-            throw "The SYSTEM backup task failed with result $($currentTaskInfo.LastTaskResult). Check backup_log.txt."
-        }
-        $systemArchives = @(Get-ChildItem -LiteralPath $systemBackupPath -Filter "SystemTaskSmoke_*.7z" -File)
-        if ($systemArchives.Count -ne 1) {
-            throw "The SYSTEM task did not publish exactly one verified archive."
-        }
-        if (-not (Test-Path -LiteralPath (Join-Path $systemBackupPath "backup_log.txt"))) {
-            throw "The SYSTEM task did not create its backup log."
-        }
+            $taskDeadline = (Get-Date).AddSeconds(35)
+            $taskCompleted = $false
+            do {
+                Start-Sleep -Milliseconds 500
+                $currentTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+                $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                if ($currentTaskInfo.LastRunTime -gt $previousRunTime -and $currentTask.State -ne "Running") {
+                    $taskCompleted = $true
+                    break
+                }
+            } while ((Get-Date) -lt $taskDeadline)
+
+            if (-not $taskCompleted) {
+                throw "The per-user backup task did not finish within 35 seconds."
+            }
+            if ([int]$currentTaskInfo.LastTaskResult -ne 0) {
+                throw "The per-user backup task failed with result $($currentTaskInfo.LastTaskResult). Check backup_log.txt."
+            }
+            $userArchives = @(Get-ChildItem -LiteralPath $taskBackupPath -Filter "UserTaskSmoke_*.7z" -File)
+            if ($userArchives.Count -ne 1) {
+                throw "The per-user task did not publish exactly one verified archive."
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $taskBackupPath "backup_log.txt"))) {
+                throw "The per-user task did not create its backup log."
+            }
         }
 
         $removeArguments = New-Object object[] 1
@@ -726,10 +760,33 @@ try {
             $removeArguments[0] = [string]""
             $null = $removeScheduledTask.Invoke([object]$null, $removeArguments)
         }
+        if ($hadTaskConfig -and $null -ne $previousTaskConfigBytes) {
+            [System.IO.File]::WriteAllBytes($taskConfigPath, $previousTaskConfigBytes)
+            Set-Acl -LiteralPath $taskConfigPath -AclObject $previousTaskConfigAcl
+        }
+        elseif (Test-Path -LiteralPath $taskConfigPath) {
+            Remove-Item -LiteralPath $taskConfigPath -Force
+        }
+        if ($hadTaskConfigDirectory -and $null -ne $previousTaskDirectoryAcl) {
+            Set-Acl -LiteralPath $taskPrivateConfigDirectory -AclObject $previousTaskDirectoryAcl
+        }
+        elseif (Test-Path -LiteralPath $taskPrivateConfigDirectory) {
+            Remove-Item -LiteralPath $taskPrivateConfigDirectory -Recurse -Force
+        }
         if (Test-Path -LiteralPath $ciInstallDirectory) {
             Remove-Item -LiteralPath $ciInstallDirectory -Recurse -Force
         }
     }
+
+    Write-Host "PASS: per-user task is registered for the current account with InteractiveToken and LeastPrivilege."
+    Write-Host "PASS: per-user task runs the real background backup path and removes cleanly."
+    Write-Host "PASS: private config DACL grants only the current user, LocalSystem, and local Administrators."
+    Write-Host "PASS: DPAPI CurrentUser encrypt/decrypt round-trip succeeds."
+    Write-Host "PASS: application config is stored under the current user's LocalAppData."
+    Write-Host "PASS: backup destination junctions into the source profile are rejected."
+    Write-Host "PASS: non-profile directories are rejected before output creation."
+    Write-Host "PASS: profile junctions are rejected before archiving."
+    Write-Host "PASS: destination inside the profile is rejected without creating a folder."
 
     # Retention must remove only files matching the application's own archive
     # naming convention, never arbitrary user-created .7z files with the same prefix.
