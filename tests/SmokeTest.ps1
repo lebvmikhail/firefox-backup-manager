@@ -53,7 +53,7 @@ try {
     Set-Content -LiteralPath (Join-Path $profilePath "logins.json") -Value '{"logins":[]}'
     Set-Content -LiteralPath (Join-Path $profilePath "prefs.js") -Value 'user_pref("browser.startup.homepage", "about:blank");'
     New-Item -ItemType Directory -Path (Join-Path $profilePath "storage") -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $profilePath "storage" "example.txt") -Value "Nested file"
+    Set-Content -LiteralPath (Join-Path (Join-Path $profilePath "storage") "example.txt") -Value "Nested file"
 
     $plain = Invoke-BackupEngine "SmokeProfile" $profilePath $backupPath "" $logPath
     if (-not $plain.Success) {
