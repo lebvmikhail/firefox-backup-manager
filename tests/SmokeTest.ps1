@@ -20,6 +20,8 @@ $ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $f
 $tryReadBackupConfig = $programType.GetMethod("TryReadBackupConfig", $flags)
 $restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
 $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
+$ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
+$removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -44,6 +46,12 @@ if ($null -eq $restoreBackup) {
 }
 if ($null -eq $isSafeArchiveEntryPath) {
     throw "IsSafeArchiveEntryPath method was not found in the application assembly."
+}
+if ($null -eq $ensureFirefoxClosed) {
+    throw "EnsureFirefoxClosed method was not found in the application assembly."
+}
+if ($null -eq $removeScheduledTask) {
+    throw "RemoveScheduledTask method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Ж [paths] & " + [Guid]::NewGuid().ToString("N"))
@@ -234,6 +242,29 @@ try {
     if ($wrongPasswordRestore.Success) {
         throw "Restore unexpectedly succeeded with an incorrect password."
     }
+
+    $corruptArchive = Join-Path $testRoot "Corrupted archive.7z"
+    Copy-Item -LiteralPath $plain.Archive -Destination $corruptArchive
+    $corruptStream = [System.IO.File]::Open($corruptArchive, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        if ($corruptStream.Length -le 80) {
+            throw "The smoke archive is too small for a deterministic corruption test."
+        }
+        $corruptStream.Position = 50
+        $originalByte = $corruptStream.ReadByte()
+        $corruptStream.Position = 50
+        $corruptStream.WriteByte([byte]($originalByte -bxor 255))
+        $corruptStream.Flush()
+    }
+    finally {
+        $corruptStream.Dispose()
+    }
+    $corruptRestore = Invoke-RestoreEngine $corruptArchive $restoreParent "" (Join-Path $restoreParent "restore_log.txt")
+    if ($corruptRestore.Success) {
+        throw "Restore unexpectedly succeeded with a corrupted archive."
+    }
+
     $leftoverStaging = @(Get-ChildItem -LiteralPath $restoreParent -Directory -Filter ".ffbm-restore-*")
     if ($leftoverStaging.Count -ne 0) {
         throw "A failed restore left temporary staging directories behind."
@@ -252,6 +283,34 @@ try {
     $absoluteArchivePathArguments[2] = [string]""
     if ([bool]$isSafeArchiveEntryPath.Invoke([object]$null, $absoluteArchivePathArguments)) {
         throw "Archive path validation accepted an absolute Windows path."
+    }
+    $deviceArchivePathArguments = New-Object object[] 3
+    $deviceArchivePathArguments[0] = [string]"CONIN$"
+    $deviceArchivePathArguments[1] = [string]$restoreParent
+    $deviceArchivePathArguments[2] = [string]""
+    if ([bool]$isSafeArchiveEntryPath.Invoke([object]$null, $deviceArchivePathArguments)) {
+        throw "Archive path validation accepted a reserved Windows console device name."
+    }
+
+    # Simulate an open Firefox process without launching the real browser.
+    $fakeFirefoxPath = Join-Path $testRoot "firefox.exe"
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\cmd.exe") -Destination $fakeFirefoxPath
+    $fakeFirefox = Start-Process -FilePath $fakeFirefoxPath -ArgumentList @("/c", "ping -n 30 127.0.0.1 > nul") -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 500
+        $firefoxGuardArguments = New-Object object[] 1
+        $firefoxGuardArguments[0] = [string]""
+        if ([bool]$ensureFirefoxClosed.Invoke([object]$null, $firefoxGuardArguments)) {
+            throw "Backup was not blocked while a firefox.exe process was present."
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$firefoxGuardArguments[0])) {
+            throw "Firefox process guard returned no diagnostic message."
+        }
+    }
+    finally {
+        if (-not $fakeFirefox.HasExited) {
+            Stop-Process -Id $fakeFirefox.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 
     $insideProfile = Join-Path $profilePath "Backup Must Not Be Created Here"
@@ -348,6 +407,66 @@ try {
         throw "A path under Program Files was incorrectly rejected for a SYSTEM startup task."
     }
 
+    # Verify real task registration under the protected installation root and clean it up.
+    $taskName = "Firefox_Local_AutoBackup"
+    $preExistingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -ne $preExistingTask) {
+        throw "The CI runner already contains $taskName; refusing to replace an unrelated task."
+    }
+    $ciInstallDirectory = Join-Path $env:ProgramFiles "Firefox Backup Manager CI"
+    $ciInstallExecutable = Join-Path $ciInstallDirectory "Firefox_Backup_Manager.exe"
+    $cleanupTaskAfterTest = $true
+    try {
+        New-Item -ItemType Directory -Path $ciInstallDirectory -Force | Out-Null
+        Copy-Item -LiteralPath $ExePath -Destination $ciInstallExecutable -Force
+
+        $taskRegistrationArguments = New-Object object[] 2
+        $taskRegistrationArguments[0] = [string]$ciInstallExecutable
+        $taskRegistrationArguments[1] = [string]""
+        if (-not [bool]$registerScheduledTask.Invoke([object]$null, $taskRegistrationArguments)) {
+            throw "RegisterScheduledTask failed under Program Files: $($taskRegistrationArguments[1])"
+        }
+
+        $createdTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $taskUser = [string]$createdTask.Principal.UserId
+        if ($taskUser -notin @("SYSTEM", "NT AUTHORITY\SYSTEM", "S-1-5-18")) {
+            throw "Scheduled task principal is not SYSTEM: $taskUser"
+        }
+        if ($createdTask.Actions.Count -ne 1 -or
+            [System.IO.Path]::GetFullPath([string]$createdTask.Actions[0].Execute) -ne
+            [System.IO.Path]::GetFullPath($ciInstallExecutable) -or
+            [string]$createdTask.Actions[0].Arguments -notmatch "--silent-backup") {
+            throw "Scheduled task action does not match the expected executable and argument."
+        }
+        if ($createdTask.Settings.DisallowStartIfOnBatteries -or $createdTask.Settings.StopIfGoingOnBatteries) {
+            throw "Scheduled task does not preserve the configured battery-friendly settings."
+        }
+        if (-not [bool]$createdTask.Triggers[0].Enabled) {
+            throw "Scheduled task startup trigger is disabled."
+        }
+
+        $removeArguments = New-Object object[] 1
+        $removeArguments[0] = [string]""
+        if (-not [bool]$removeScheduledTask.Invoke([object]$null, $removeArguments)) {
+            throw "RemoveScheduledTask failed after successful registration: $($removeArguments[0])"
+        }
+        $remainingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -ne $remainingTask) {
+            throw "Scheduled task remained registered after removal."
+        }
+        $cleanupTaskAfterTest = $false
+    }
+    finally {
+        if ($cleanupTaskAfterTest) {
+            $removeArguments = New-Object object[] 1
+            $removeArguments[0] = [string]""
+            $null = $removeScheduledTask.Invoke([object]$null, $removeArguments)
+        }
+        if (Test-Path -LiteralPath $ciInstallDirectory) {
+            Remove-Item -LiteralPath $ciInstallDirectory -Recurse -Force
+        }
+    }
+
     # Retention must remove only files matching the application's own archive
     # naming convention, never arbitrary user-created .7z files with the same prefix.
     $oldManagedArchive = Join-Path $backupPath "SmokeProfile_2000-01-01_00-00-00_deadbeef.7z"
@@ -372,7 +491,10 @@ try {
 
     Write-Host "PASS: unencrypted archive created, tested, and restored to a separate directory."
     Write-Host "PASS: encrypted archive with Unicode paths restored; wrong password rejected."
-    Write-Host "PASS: archive path traversal and absolute paths rejected before extraction."
+    Write-Host "PASS: archive path traversal, absolute paths, and reserved device names rejected."
+    Write-Host "PASS: corrupted archive and wrong password fail without leaving staging folders."
+    Write-Host "PASS: running firefox.exe blocks backup without terminating the process."
+    Write-Host "PASS: SYSTEM startup task registers with the expected action and settings, then removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
