@@ -26,6 +26,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Xml;
+using System.Security.Principal;
 
 class Program {
     static string regKeyName = "Firefox_Local_AutoBackup";
@@ -83,7 +84,7 @@ class Program {
     static string EncryptPassword(string password) {
         if (string.IsNullOrEmpty(password)) return "";
         byte[] data = Encoding.UTF8.GetBytes(password);
-        byte[] encrypted = ProtectedData.Protect(data, null, DataProtectionScope.LocalMachine);
+        byte[] encrypted = ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
         return Convert.ToBase64String(encrypted);
     }
 
@@ -92,7 +93,7 @@ class Program {
         if (string.IsNullOrEmpty(encryptedBase64)) return true;
         try {
             byte[] encrypted = Convert.FromBase64String(encryptedBase64);
-            byte[] decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.LocalMachine);
+            byte[] decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
             password = Encoding.UTF8.GetString(decrypted);
             return true;
         } catch (Exception ex) {
@@ -242,19 +243,21 @@ class Program {
         return candidate.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
-    // SYSTEM startup tasks must use binaries from the normally protected Program Files roots.
-    static bool IsProtectedProgramFilesLocation(string executablePath) {
+    static string GetUserDataDirectory() {
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrEmpty(localAppData))
+            throw new InvalidOperationException("Не удалось определить LocalAppData текущего пользователя.");
+        return Path.Combine(localAppData, "Firefox Backup Manager");
+    }
+
+    static bool IsRunningAsSystem() {
         try {
-            string candidate = Path.GetFullPath(executablePath);
-            string[] roots = new string[] {
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
-            };
-            foreach (string root in roots) {
-                if (!string.IsNullOrEmpty(root) && IsPathSameOrInside(root, candidate)) return true;
-            }
-        } catch {}
-        return false;
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            return identity != null && identity.User != null &&
+                   string.Equals(identity.User.Value, "S-1-5-18", StringComparison.Ordinal);
+        } catch {
+            return true;
+        }
     }
 
     static string MakeSafeFileName(string value) {
@@ -961,7 +964,9 @@ class Program {
         return launched && exitCode == 0;
     }
 
-    static bool IsScheduledTaskUsingUnsafeExecutable() {
+    // Old releases created a SYSTEM task. The new model only accepts an interactive
+    // task for the current account with the least-privileged run level.
+    static bool IsScheduledTaskUsingUnsafeSecurityContext() {
         int exitCode; string output; string error;
         bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
                                    30000, null, out exitCode, out output, out error);
@@ -971,8 +976,25 @@ class Program {
             document.LoadXml(output);
             XmlNamespaceManager namespaces = new XmlNamespaceManager(document.NameTable);
             namespaces.AddNamespace("task", "http://schemas.microsoft.com/windows/2004/02/mit/task");
-            XmlNode commandNode = document.SelectSingleNode("//task:Actions/task:Exec/task:Command", namespaces);
-            return commandNode == null || !IsProtectedProgramFilesLocation(commandNode.InnerText);
+            XmlNode userNode = document.SelectSingleNode("//task:Principals/task:Principal/task:UserId", namespaces);
+            XmlNode logonNode = document.SelectSingleNode("//task:Principals/task:Principal/task:LogonType", namespaces);
+            XmlNode runLevelNode = document.SelectSingleNode("//task:Principals/task:Principal/task:RunLevel", namespaces);
+            if (userNode == null || logonNode == null || runLevelNode == null) return true;
+
+            string configuredUser = userNode.InnerText.Trim();
+            string configuredLogon = logonNode.InnerText.Trim();
+            string configuredRunLevel = runLevelNode.InnerText.Trim();
+            if (string.Equals(configuredUser, "SYSTEM", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(configuredUser, "NT AUTHORITY\\SYSTEM", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(configuredUser, "S-1-5-18", StringComparison.OrdinalIgnoreCase)) return true;
+            if (!string.Equals(configuredLogon, "InteractiveToken", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(configuredRunLevel, "LeastPrivilege", StringComparison.OrdinalIgnoreCase)) return true;
+
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            string currentName = identity == null ? "" : identity.Name;
+            string currentSid = identity == null || identity.User == null ? "" : identity.User.Value;
+            return !string.Equals(configuredUser, currentName, StringComparison.OrdinalIgnoreCase) &&
+                   !string.Equals(configuredUser, currentSid, StringComparison.OrdinalIgnoreCase);
         } catch {
             return true;
         }
@@ -991,23 +1013,35 @@ class Program {
     }
 
     static bool RegisterScheduledTask(string exePath, out string error) {
-        if (!IsProtectedProgramFilesLocation(exePath)) {
-            error = "Задача запускается от SYSTEM, поэтому EXE должен находиться в защищённом каталоге Program Files. Переместите Firefox_Backup_Manager.exe в Program Files и запустите его от имени администратора.";
+        error = "";
+        string fullExecutablePath;
+        try {
+            fullExecutablePath = Path.GetFullPath(exePath);
+            if (!File.Exists(fullExecutablePath) ||
+                (File.GetAttributes(fullExecutablePath) & FileAttributes.ReparsePoint) != 0) {
+                error = "Исполняемый файл задачи не существует или является файловой ссылкой.";
+                return false;
+            }
+        } catch (Exception ex) {
+            error = "Не удалось проверить путь приложения для задачи: " + ex.Message;
             return false;
         }
+
         int exitCode;
         string output;
         string taskName = regKeyName.Replace("'", "''");
-        string executable = exePath.Replace("'", "''");
+        string executable = fullExecutablePath.Replace("'", "''");
+        string taskUser = (Environment.UserDomainName + "\\" + Environment.UserName).Replace("'", "''");
 
-        // Preserve the original battery-friendly settings while checking the
-        // PowerShell exit code and verifying that the task is actually present.
+        // The task runs only in this user's interactive session, with LUA privileges.
+        // It therefore has no more rights than the account that selected the destination.
         string command =
             "$ErrorActionPreference = 'Stop'; try { " +
             "$act = New-ScheduledTaskAction -Execute '" + executable + "' -Argument '--silent-backup'; " +
-            "$trig = New-ScheduledTaskTrigger -AtStartup; " +
-            "$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; " +
-            "Register-ScheduledTask -TaskName '" + taskName + "' -Action $act -Trigger $trig -Settings $set -User 'SYSTEM' -Force | Out-Null; " +
+            "$trig = New-ScheduledTaskTrigger -AtLogOn -User '" + taskUser + "'; " +
+            "$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable; " +
+            "$principal = New-ScheduledTaskPrincipal -UserId '" + taskUser + "' -LogonType Interactive -RunLevel Limited; " +
+            "Register-ScheduledTask -TaskName '" + taskName + "' -Action $act -Trigger $trig -Settings $set -Principal $principal -Force | Out-Null; " +
             "exit 0 } catch { Write-Error $_; exit 1 }";
 
         bool launched = RunProcess(GetSystemExecutablePath(Path.Combine("WindowsPowerShell", "v1.0", "powershell.exe")),
@@ -1015,11 +1049,11 @@ class Program {
             30000, null, out exitCode, out output, out error);
 
         if (!launched || exitCode != 0) {
-            if (string.IsNullOrEmpty(error)) error = "PowerShell не смог зарегистрировать задачу. " + output;
+            if (string.IsNullOrEmpty(error)) error = "PowerShell не смог зарегистрировать задачу для текущего пользователя. " + output;
             return false;
         }
-        if (!IsScheduledTaskRegistered()) {
-            error = "Команда регистрации завершилась успешно, но задача не найдена при контрольной проверке.";
+        if (!IsScheduledTaskRegistered() || IsScheduledTaskUsingUnsafeSecurityContext()) {
+            error = "Задача зарегистрирована, но проверка её пользовательского контекста и минимальных прав не пройдена.";
             return false;
         }
         return true;
@@ -1057,25 +1091,34 @@ class Program {
                                   (string.IsNullOrEmpty(error) ? output : error));
     }
 
+    static string GetCurrentUserSid() {
+        WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        if (identity == null || identity.User == null)
+            throw new InvalidOperationException("Не удалось определить SID текущего пользователя.");
+        return identity.User.Value;
+    }
+
     static void ApplyPrivateDirectorySecurity(string directoryPath) {
+        string userSid = "*" + GetCurrentUserSid() + ":(OI)(CI)F";
         RunIcacls(directoryPath, new string[] { "/reset", "/Q" });
         RunIcacls(directoryPath, new string[] {
             "/inheritance:r", "/grant:r",
-            "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F",
+            userSid, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F",
             "/Q"
         });
     }
 
     static void ApplyPrivateFileSecurity(string filePath) {
+        string userSid = "*" + GetCurrentUserSid() + ":F";
         RunIcacls(filePath, new string[] { "/reset", "/Q" });
         RunIcacls(filePath, new string[] {
             "/inheritance:r", "/grant:r",
-            "*S-1-5-18:F", "*S-1-5-32-544:F",
+            userSid, "*S-1-5-18:F", "*S-1-5-32-544:F",
             "/Q"
         });
     }
 
-    // Any local account that can read a DPAPI LocalMachine blob can decrypt it.
+    // The private config is stored in LocalAppData and encrypted with DPAPI CurrentUser.    // Any local account that can read a DPAPI LocalMachine blob can decrypt it.
     // The config file therefore relies on a protected DACL as a second boundary.
     static bool EnsurePrivateConfigDirectory(string applicationDirectory,
                                              out string configFile, out string error) {
@@ -1250,22 +1293,22 @@ class Program {
     static int Main(string[] args) {
         Application.EnableVisualStyles();
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
-        string configFile = Path.Combine(currentDir, "PrivateConfig", "config.ini");
-        string executablePath = Path.Combine(currentDir, "Firefox_Backup_Manager.exe");
-        bool protectedInstallLocation = IsProtectedProgramFilesLocation(executablePath);
-        // РЕЖИМ 1: Фоновое резервное копирование при старте Windows.
+        string userDataDirectory;
+        string configFile;
+        try {
+            userDataDirectory = GetUserDataDirectory();
+            configFile = Path.Combine(userDataDirectory, "PrivateConfig", "config.ini");
+        } catch {
+            return 10;
+        }
+
+        // РЕЖИМ 1: Фоновое резервное копирование при входе текущего пользователя.
         if (args.Length > 0 && args[0] == "--silent-backup") {
-            if (!protectedInstallLocation) {
-                string unsafeTaskRemovalError;
-                RemoveScheduledTask(out unsafeTaskRemovalError);
-                return 8;
-            }
+            // A legacy SYSTEM task must never perform file operations in this version.
+            if (IsRunningAsSystem()) return 8;
+
             string privateConfigError;
-            if (!EnsurePrivateConfigDirectory(currentDir, out configFile, out privateConfigError)) {
-                string removalError;
-                RemoveScheduledTask(out removalError);
-                return 9;
-            }
+            if (!EnsurePrivateConfigDirectory(userDataDirectory, out configFile, out privateConfigError)) return 9;
             if (!File.Exists(configFile)) return 2;
             string profName, profPath, backupDir, encryptedPass, configValidationError;
             if (!TryReadBackupConfig(configFile, out profName, out profPath, out backupDir,
@@ -1285,30 +1328,30 @@ class Program {
 
             RetainOldBackups(profName, backupDir, logFile);
             AppendLogWithRotation(logFile, string.Format(
-                "[{0}] [УСПЕХ] Резервное копирование завершено: {1}\r\n==================================================\r\n",
+                "[{0}] [УСПЕХ] Резервное копирование завершено: {1}\\r\\n==================================================\\r\\n",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), createdArchive));
             return 0;
         }
 
-        if (protectedInstallLocation) {
-            string privateConfigError;
-            if (!EnsurePrivateConfigDirectory(currentDir, out configFile, out privateConfigError)) {
-                MessageBox.Show(privateConfigError + "\n\nАвтозапуск не будет настроен, пока конфигурация не защищена.",
-                    "Ошибка защиты конфигурации", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return 9;
-            }
+        // Never silently replace a task created by the previous SYSTEM-based release.
+        // Its removal requires an explicit administrator action; old archives remain untouched.
+        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeSecurityContext()) {
+            MessageBox.Show(
+                "Обнаружена задача Firefox Backup Manager старой версии, работающая от SYSTEM. " +
+                "Новая версия больше не использует SYSTEM для резервного копирования.\\n\\n" +
+                "Один раз откройте Терминал или PowerShell от имени администратора и выполните:\\n" +
+                "schtasks /Delete /TN Firefox_Local_AutoBackup /F\\n\\n" +
+                "Затем снова запустите приложение и настройте резервирование заново. " +
+                "Старые архивы и прежняя конфигурация не удаляются автоматически.",
+                "Требуется обновление задачи автозапуска", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return 11;
         }
 
-        // Remove an old SYSTEM task if its action still points to a user-writable path.
-        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeExecutable()) {
-            string taskRemovalError;
-            if (!RemoveScheduledTask(out taskRemovalError)) {
-                MessageBox.Show("Не удалось удалить старую небезопасную задачу SYSTEM. Удалите Firefox_Local_AutoBackup в Планировщике заданий вручную.\\n\\n" + taskRemovalError,
-                    "Предупреждение безопасности", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            } else {
-                MessageBox.Show("Старая задача SYSTEM ссылалась на EXE вне Program Files и была удалена. Настройте автозапуск заново после установки приложения в Program Files.",
-                    "Исправление безопасности", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
+        string configError;
+        if (!EnsurePrivateConfigDirectory(userDataDirectory, out configFile, out configError)) {
+            MessageBox.Show(configError + "\\n\\nАвтозапуск не будет настроен, пока пользовательская конфигурация не защищена.",
+                "Ошибка защиты конфигурации", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 9;
         }
 
         // РЕЖИМ 2: Интерактивное графическое меню настроек
@@ -1608,7 +1651,7 @@ class Program {
                     "Частичное завершение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            MessageBox.Show("Задача автозапуска удалена, файл настроек удален. Архивы резервных копий не затронуты.",
+            MessageBox.Show("Задача автозапуска текущего пользователя удалена, файл настроек удалён. Архивы резервных копий не затронуты.",
                 "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
             menuForm.Close();
         };
