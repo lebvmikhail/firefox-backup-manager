@@ -4,6 +4,9 @@ set "CSC_PATH=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC_PATH%" set "CSC_PATH=C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe"
 
 if not exist "%~dp0compiler_code.cs" goto NO_CODE_BLOCK
+if not exist "%CSC_PATH%" goto NO_COMPILER_BLOCK
+
+set "BUILD_EXIT_CODE=0"
 
 (
 echo ^<?xml version="1.0" encoding="utf-8"?^>
@@ -40,12 +43,21 @@ goto END_BLOCK
 
 :NO_CODE_BLOCK
 echo [ОШИБКА] Файл с исходным кодом compiler_code.cs не найден в этой папке!
+set "BUILD_EXIT_CODE=1"
+goto END_BLOCK
+
+:NO_COMPILER_BLOCK
+echo [ОШИБКА] Не найден компилятор C# .NET Framework: "%CSC_PATH%".
+set "BUILD_EXIT_CODE=1"
 goto END_BLOCK
 
 :ERROR_BLOCK
 echo [ОШИБКА] Не удалось скомпилировать файл.
+set "BUILD_EXIT_CODE=1"
 goto END_BLOCK
 
 :END_BLOCK
 del /q "%~dp0app.MANIFEST" >nul 2>&1
+if /I "%CI%"=="true" exit /b %BUILD_EXIT_CODE%
 pause
+exit /b %BUILD_EXIT_CODE%
