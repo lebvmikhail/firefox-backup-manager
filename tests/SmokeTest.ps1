@@ -24,6 +24,7 @@ $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flag
 $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
 $deleteDirectoryNoFollow = $programType.GetMethod("DeleteDirectoryNoFollow", $flags)
+$ensurePathHasNoReparsePoints = $programType.GetMethod("EnsurePathHasNoReparsePoints", $flags)
 $ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
@@ -58,6 +59,9 @@ if ($null -eq $ensureFirefoxClosed) {
 }
 if ($null -eq $deleteDirectoryNoFollow) {
     throw "DeleteDirectoryNoFollow method was not found in the application assembly."
+}
+if ($null -eq $ensurePathHasNoReparsePoints) {
+    throw "EnsurePathHasNoReparsePoints method was not found in the application assembly."
 }
 if ($null -eq $removeScheduledTask) {
     throw "RemoveScheduledTask method was not found in the application assembly."
@@ -250,6 +254,37 @@ try {
         if ($logText.Contains($password)) {
             throw "The archive password was unexpectedly written to the backup log."
         }
+    }
+
+    # Reject a backup destination that is a junction into the source profile.
+    $profileBackupTarget = Join-Path $profilePath "backup-target"
+    New-Item -ItemType Directory -Path $profileBackupTarget -Force | Out-Null
+    $backupJunction = Join-Path $testRoot "Backup Destination Junction"
+    $backupJunctionCommand = 'mklink /J "' + $backupJunction + '" "' + $profileBackupTarget + '"'
+    & $env:ComSpec /c $backupJunctionCommand | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupJunction)) {
+        throw "Could not create the backup destination junction."
+    }
+    try {
+        $aliasedBackup = Invoke-BackupEngine "Smoke Profile Ж" $profilePath $backupJunction "" $logPath
+        if ($aliasedBackup.Success) {
+            throw "Backup unexpectedly accepted a destination junction into the source profile."
+        }
+        if (@(Get-ChildItem -LiteralPath $profileBackupTarget -Filter "*.7z" -File).Count -ne 0) {
+            throw "Backup wrote an archive through a destination junction into the source profile."
+        }
+    }
+    finally {
+        & $env:ComSpec /c ('rmdir "' + $backupJunction + '"') | Out-Null
+    }
+
+    # A directory without Firefox root markers must be rejected before creating output.
+    $nonProfilePath = Join-Path $testRoot "Not A Firefox Profile"
+    $nonProfileBackup = Join-Path $testRoot "Non Profile Backup Output"
+    New-Item -ItemType Directory -Path $nonProfilePath -Force | Out-Null
+    $nonProfile = Invoke-BackupEngine "Not Firefox" $nonProfilePath $nonProfileBackup "" $logPath
+    if ($nonProfile.Success -or (Test-Path -LiteralPath $nonProfileBackup)) {
+        throw "Backup unexpectedly accepted a directory without Firefox profile marker files."
     }
 
     # Check archives separately without extracting; wrong passwords must fail.
@@ -650,6 +685,8 @@ try {
     Write-Host "PASS: SYSTEM startup task registers, runs the real background backup path, and removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
+    Write-Host "PASS: backup destination junctions into the source profile are rejected."
+    Write-Host "PASS: non-profile directories are rejected before output creation."
     Write-Host "PASS: profile junctions are rejected before archiving."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
     Write-Host "PASS: retention removes expired managed archives and preserves unrelated .7z files."
