@@ -682,9 +682,20 @@ try {
 
         $createdTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
         $taskUser = [string]$createdTask.Principal.UserId
-        $expectedUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        if ($taskUser -ne $expectedUser -and $taskUser -ne $currentUserSid) {
-            throw "Scheduled task principal is not the current user: $taskUser (expected $expectedUser / $currentUserSid)"
+        $taskUserSid = $taskUser
+        if ($taskUser -notmatch '^S-\\d-') {
+            try {
+                $taskUserSid = [System.Security.Principal.NTAccount]::new($taskUser).Translate(
+                    [System.Security.Principal.SecurityIdentifier]).Value
+            } catch {
+                if ($taskUser -match '\\\\') { throw }
+                $localTaskAccount = [System.Security.Principal.NTAccount]::new("$env:COMPUTERNAME\\$taskUser")
+                $taskUserSid = $localTaskAccount.Translate(
+                    [System.Security.Principal.SecurityIdentifier]).Value
+            }
+        }
+        if ($taskUserSid -ne $currentUserSid) {
+            throw "Scheduled task principal does not resolve to the current user's SID: $taskUser (resolved $taskUserSid; expected $currentUserSid)"
         }
         $logonType = [string]$createdTask.Principal.LogonType
         if ($logonType -notin @("Interactive", "InteractiveToken")) {
