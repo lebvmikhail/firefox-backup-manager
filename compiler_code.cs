@@ -540,6 +540,17 @@ class Program {
             FolderBrowserDialog fbd = new FolderBrowserDialog() { Description = "ШАГ 2 из 3: Выберите папку для сохранения архивов" };
             if (fbd.ShowDialog() != DialogResult.OK) return;
             string chosenBackupDir = fbd.SelectedPath.Trim();
+            try {
+                if (IsPathSameOrInside(chosenPath, chosenBackupDir)) {
+                    MessageBox.Show("Папка резервных копий не может находиться внутри профиля Firefox. Выберите отдельный каталог.",
+                        "Недопустимая папка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            } catch (Exception ex) {
+                MessageBox.Show("Не удалось проверить путь для резервных копий.\n\n" + ex.Message,
+                    "Ошибка пути", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             Form passForm = new Form() { Text = "ШАГ 3 из 3: Безопасность архива", Width = 400, Height = 180, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
             Label lblPass = new Label() { Text = "Задайте секретный пароль для защиты бэкапа (необязательно):\nЕсли пароль не нужен - просто оставьте поле пустым.", Left = 20, Top = 15, Width = 350, Height = 35 };
