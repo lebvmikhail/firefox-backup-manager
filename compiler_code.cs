@@ -102,7 +102,7 @@ class Program {
     }
 
     static bool RunProcess(string fileName, string arguments, int timeoutMilliseconds,
-                           out int exitCode, out string output, out string error) {
+                           string standardInput, out int exitCode, out string output, out string error) {
         exitCode = -1; output = ""; error = "";
         Process process = null;
         StringBuilder captured = new StringBuilder();
@@ -113,6 +113,7 @@ class Program {
             info.UseShellExecute = false; info.CreateNoWindow = true;
             info.WindowStyle = ProcessWindowStyle.Hidden;
             info.RedirectStandardOutput = true; info.RedirectStandardError = true;
+            info.RedirectStandardInput = standardInput != null;
 
             process = new Process(); process.StartInfo = info;
             DataReceivedEventHandler capture = delegate(object sender, DataReceivedEventArgs e) {
@@ -121,6 +122,13 @@ class Program {
             process.OutputDataReceived += capture; process.ErrorDataReceived += capture;
             if (!process.Start()) { error = "Не удалось запустить процесс " + fileName + "."; return false; }
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
+
+            if (standardInput != null) {
+                byte[] inputBytes = Encoding.UTF8.GetBytes(standardInput + "\r\n");
+                process.StandardInput.BaseStream.Write(inputBytes, 0, inputBytes.Length);
+                process.StandardInput.BaseStream.Flush();
+                process.StandardInput.Close();
+            }
 
             if (!process.WaitForExit(timeoutMilliseconds)) {
                 try { process.Kill(); } catch {}
@@ -188,10 +196,11 @@ class Program {
         return string.IsNullOrEmpty(result) ? "FirefoxProfile" : result;
     }
 
-    static bool Run7Zip(string zip7, string[] arguments, string logFile, out int exitCode, out string error) {
+    static bool Run7Zip(string zip7, string[] arguments, string passwordInput,
+                        string logFile, out int exitCode, out string error) {
         string output;
         bool launched = RunProcess(zip7, BuildCommandLine(arguments), 2 * 60 * 60 * 1000,
-                                   out exitCode, out output, out error);
+                                   passwordInput, out exitCode, out output, out error);
         if (!string.IsNullOrEmpty(output)) AppendLogWithRotation(logFile, "\r\n[7-ZIP OUTPUT]:\r\n" + output);
         if (!launched) return false;
         if (exitCode != 0) {
@@ -254,12 +263,18 @@ class Program {
                 List<string> addArguments = new List<string>();
                 addArguments.Add("a"); addArguments.Add("-t7z"); addArguments.Add("-mx5");
                 addArguments.Add("-x@" + excludeFile);
-                if (!string.IsNullOrEmpty(password)) { addArguments.Add("-p" + password); addArguments.Add("-mhe=on"); }
+                if (!string.IsNullOrEmpty(password)) {
+                    addArguments.Add("-p");
+                    addArguments.Add("-mhe=on");
+                    addArguments.Add("-sccUTF-8");
+                }
                 addArguments.Add(temporaryArchive);
                 addArguments.Add(Path.Combine(fullProfilePath, "*"));
 
                 int addExitCode;
-                if (!Run7Zip(zip7, addArguments.ToArray(), logFile, out addExitCode, out error)) {
+                if (!Run7Zip(zip7, addArguments.ToArray(),
+                             string.IsNullOrEmpty(password) ? null : password,
+                             logFile, out addExitCode, out error)) {
                     error = "Создание архива не удалось. " + error; return false;
                 }
                 if (!File.Exists(temporaryArchive) || new FileInfo(temporaryArchive).Length <= 0) {
@@ -268,10 +283,15 @@ class Program {
 
                 List<string> testArguments = new List<string>();
                 testArguments.Add("t"); testArguments.Add("-y");
-                if (!string.IsNullOrEmpty(password)) testArguments.Add("-p" + password);
+                if (!string.IsNullOrEmpty(password)) {
+                    testArguments.Add("-p");
+                    testArguments.Add("-sccUTF-8");
+                }
                 testArguments.Add(temporaryArchive);
                 int testExitCode;
-                if (!Run7Zip(zip7, testArguments.ToArray(), logFile, out testExitCode, out error)) {
+                if (!Run7Zip(zip7, testArguments.ToArray(),
+                             string.IsNullOrEmpty(password) ? null : password,
+                             logFile, out testExitCode, out error)) {
                     error = "Проверка целостности нового архива не пройдена. " + error; return false;
                 }
 
@@ -323,7 +343,7 @@ class Program {
     static bool IsScheduledTaskRegistered() {
         int exitCode; string output; string error;
         bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName),
-                                   30000, out exitCode, out output, out error);
+                                   30000, null, out exitCode, out output, out error);
         return launched && exitCode == 0;
     }
 
@@ -345,7 +365,7 @@ class Program {
 
         bool launched = RunProcess("powershell.exe",
             BuildCommandLine("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command),
-            30000, out exitCode, out output, out error);
+            30000, null, out exitCode, out output, out error);
 
         if (!launched || exitCode != 0) {
             if (string.IsNullOrEmpty(error)) error = "PowerShell не смог зарегистрировать задачу. " + output;
@@ -627,7 +647,7 @@ class Program {
             int exitCode;
             string output, commandError;
             bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
-                                       30000, out exitCode, out output, out commandError);
+                                       30000, null, out exitCode, out output, out commandError);
             if (!launched || (exitCode != 0 && IsScheduledTaskRegistered())) {
                 MessageBox.Show("Не удалось подтвердить удаление задачи Планировщика. Конфигурация сохранена.\n\n" +
                     (string.IsNullOrEmpty(commandError) ? output : commandError),
