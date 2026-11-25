@@ -683,13 +683,13 @@ try {
         $createdTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
         $taskUser = [string]$createdTask.Principal.UserId
         $taskUserSid = $taskUser
-        if ($taskUser -notmatch '^S-\\d-') {
+        if ($taskUser -notmatch '^S-\d-') {
             try {
                 $taskUserSid = [System.Security.Principal.NTAccount]::new($taskUser).Translate(
                     [System.Security.Principal.SecurityIdentifier]).Value
             } catch {
-                if ($taskUser -match '\\\\') { throw }
-                $localTaskAccount = [System.Security.Principal.NTAccount]::new("$env:COMPUTERNAME\\$taskUser")
+                if ($taskUser -match '\\') { throw }
+                $localTaskAccount = [System.Security.Principal.NTAccount]::new("$env:COMPUTERNAME\$taskUser")
                 $taskUserSid = $localTaskAccount.Translate(
                     [System.Security.Principal.SecurityIdentifier]).Value
             }
