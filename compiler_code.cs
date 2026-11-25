@@ -531,6 +531,47 @@ class Program {
     }
 
 
+    // Validate an existing ancestor before creating the destination, then validate
+    // the completed path. This blocks pre-existing junction redirection before the
+    // first write; it is not a handle-based defense against a concurrent TOCTOU race.
+    static bool PrepareBackupDestination(string backupDir, out string fullBackupDir, out string error) {
+        fullBackupDir = ""; error = "";
+        try {
+            if (string.IsNullOrEmpty(backupDir)) {
+                error = "Не задан каталог для резервных копий.";
+                return false;
+            }
+            fullBackupDir = Path.GetFullPath(backupDir);
+            if (File.Exists(fullBackupDir)) {
+                error = "Путь назначения существует как файл, а не как каталог.";
+                return false;
+            }
+            string existingAncestor = fullBackupDir;
+            while (!Directory.Exists(existingAncestor)) {
+                string parent = Path.GetDirectoryName(existingAncestor);
+                if (string.IsNullOrEmpty(parent) ||
+                    string.Equals(parent, existingAncestor, StringComparison.OrdinalIgnoreCase)) {
+                    error = "Не удалось найти существующий родительский каталог назначения.";
+                    return false;
+                }
+                existingAncestor = parent;
+            }
+            if (!EnsurePathHasNoReparsePoints(existingAncestor, out error)) {
+                error = "Родительский путь назначения содержит файловую ссылку: " + error;
+                return false;
+            }
+            Directory.CreateDirectory(fullBackupDir);
+            if (!EnsurePathHasNoReparsePoints(fullBackupDir, out error)) {
+                error = "Путь для резервных копий содержит файловую ссылку: " + error;
+                return false;
+            }
+            return true;
+        } catch (Exception ex) {
+            error = "Не удалось безопасно подготовить каталог резервных копий: " + ex.Message;
+            return false;
+        }
+    }
+
     static bool EnsurePathHasNoReparsePoints(string path, out string error) {
         error = "";
         try {
@@ -749,11 +790,9 @@ class Program {
             }
             // Refuse before creating the destination directory or lock file if Firefox is open.
             if (enforceFirefoxClosed && !EnsureFirefoxClosed(out error)) return false;
-            Directory.CreateDirectory(fullBackupDir);
-            if (!EnsurePathHasNoReparsePoints(fullBackupDir, out error)) {
-                error = "Путь для резервных копий содержит файловую ссылку: " + error;
-                return false;
-            }
+            string preparedBackupDir;
+            if (!PrepareBackupDestination(fullBackupDir, out preparedBackupDir, out error)) return false;
+            fullBackupDir = preparedBackupDir;
 
             long requiredSpace; string sizeError;
             if (!TryGetDirectorySize(fullProfilePath, out requiredSpace, out sizeError)) { error = sizeError; return false; }
@@ -902,16 +941,29 @@ class Program {
         }
     }
 
+    // Resolve Windows utilities from the OS system directory, never through the
+    // executable/current-directory/PATH search order.
+    static string GetSystemExecutablePath(string relativePath) {
+        string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if (string.IsNullOrEmpty(systemDirectory))
+            throw new InvalidOperationException("Не удалось определить системный каталог Windows.");
+        string root = Path.GetFullPath(systemDirectory);
+        string candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+        if (!IsPathSameOrInside(root, candidate))
+            throw new InvalidOperationException("Путь системной утилиты выходит за пределы системного каталога Windows.");
+        return candidate;
+    }
+
     static bool IsScheduledTaskRegistered() {
         int exitCode; string output; string error;
-        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName),
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", regKeyName),
                                    30000, null, out exitCode, out output, out error);
         return launched && exitCode == 0;
     }
 
     static bool IsScheduledTaskUsingUnsafeExecutable() {
         int exitCode; string output; string error;
-        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
                                    30000, null, out exitCode, out output, out error);
         if (!launched || exitCode != 0 || string.IsNullOrEmpty(output)) return true;
         try {
@@ -928,7 +980,7 @@ class Program {
 
     static bool RemoveScheduledTask(out string error) {
         int exitCode; string output;
-        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
                                    30000, null, out exitCode, out output, out error);
         if (!launched) return false;
         if (IsScheduledTaskRegistered()) {
@@ -958,7 +1010,7 @@ class Program {
             "Register-ScheduledTask -TaskName '" + taskName + "' -Action $act -Trigger $trig -Settings $set -User 'SYSTEM' -Force | Out-Null; " +
             "exit 0 } catch { Write-Error $_; exit 1 }";
 
-        bool launched = RunProcess("powershell.exe",
+        bool launched = RunProcess(GetSystemExecutablePath(Path.Combine("WindowsPowerShell", "v1.0", "powershell.exe")),
             BuildCommandLine("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command),
             30000, null, out exitCode, out output, out error);
 
@@ -1221,28 +1273,15 @@ class Program {
 
             string logFile;
             try {
-                Directory.CreateDirectory(backupDir);
-                logFile = Path.Combine(backupDir, "backup_log.txt");
+                logFile = Path.Combine(Path.GetFullPath(backupDir), "backup_log.txt");
             } catch { return 5; }
 
-            AppendLogWithRotation(logFile, string.Format(
-                "==================================================\r\n[{0}] [АВТОЗАПУСК ПК] Начало резервного копирования.\r\n",
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
-
             string realPassword, passwordError;
-            if (!TryDecryptPassword(encryptedPass, out realPassword, out passwordError)) {
-                AppendLogWithRotation(logFile, "[ОШИБКА] " + passwordError + " Резервирование отменено; открытый архив не создавался.\r\n");
-                return 6;
-            }
+            if (!TryDecryptPassword(encryptedPass, out realPassword, out passwordError)) return 6;
 
             string createdArchive, backupError;
             if (!CreateBackup(profName, profPath, backupDir, realPassword, logFile,
-                              out createdArchive, out backupError)) {
-                AppendLogWithRotation(logFile, string.Format(
-                    "[{0}] [ОШИБКА] Резервное копирование не выполнено: {1}\r\n==================================================\r\n",
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), backupError));
-                return 7;
-            }
+                              out createdArchive, out backupError)) return 7;
 
             RetainOldBackups(profName, backupDir, logFile);
             AppendLogWithRotation(logFile, string.Format(
@@ -1507,15 +1546,11 @@ class Program {
                 return;
             }
 
-            string startLog = Path.Combine(chosenBackupDir, "backup_log.txt");
-            AppendLogWithRotation(startLog, string.Format(
-                "==================================================\r\n[{0}] [ПЕРВЫЙ ЗАПУСК] Создание и проверка стартовой копии...\r\n",
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
+            string startLog = Path.Combine(Path.GetFullPath(chosenBackupDir), "backup_log.txt");
 
             string firstArchive, firstBackupError;
             if (!CreateBackup(chosenName, chosenPath, chosenBackupDir, chosenPassword, startLog,
                               out firstArchive, out firstBackupError)) {
-                AppendLogWithRotation(startLog, "[ОШИБКА] Первая резервная копия не создана: " + firstBackupError + "\r\n");
                 MessageBox.Show("Первая резервная копия не создана. Автозапуск не настраивался.\n\n" + firstBackupError,
                     "Ошибка резервного копирования", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -1558,7 +1593,7 @@ class Program {
         btnDelete.Click += (s, e) => {
             int exitCode;
             string output, commandError;
-            bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+            bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
                                        30000, null, out exitCode, out output, out commandError);
             if (!launched || (exitCode != 0 && IsScheduledTaskRegistered())) {
                 MessageBox.Show("Не удалось подтвердить удаление задачи Планировщика. Конфигурация сохранена.\n\n" +
