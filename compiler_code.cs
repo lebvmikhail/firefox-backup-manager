@@ -876,11 +876,12 @@ class Program {
             string rawBackupDirectory = values["BackupDir"];
             encryptedPassword = values["BackupPassword"];
 
+            // An empty BackupPassword is valid and means that the user deliberately
+            // chose an unencrypted archive. The key itself is still mandatory.
             if (string.IsNullOrWhiteSpace(profileName) || profileName.Length > 256 ||
                 string.IsNullOrWhiteSpace(rawProfilePath) ||
-                string.IsNullOrWhiteSpace(rawBackupDirectory) ||
-                string.IsNullOrWhiteSpace(encryptedPassword)) {
-                error = "Одно или несколько обязательных значений конфигурации пусты или слишком длинные.";
+                string.IsNullOrWhiteSpace(rawBackupDirectory)) {
+                error = "Имя профиля, путь к профилю и каталог резервных копий обязательны.";
                 return false;
             }
 
