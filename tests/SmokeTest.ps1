@@ -860,26 +860,70 @@ try {
     Write-Host "PASS: profile junctions are rejected before archiving."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
 
-    # Retention must remove only files matching the application's own archive
-    # naming convention, never arbitrary user-created .7z files with the same prefix.
-    $oldManagedArchive = Join-Path $backupPath "SmokeProfile_2000-01-01_00-00-00_deadbeef.7z"
-    $oldManualArchive = Join-Path $backupPath "SmokeProfile_manual-export.7z"
-    Set-Content -LiteralPath $oldManagedArchive -Value "old managed archive placeholder"
+    # Retention removes only application-managed files and keeps the three newest
+    # archives even when they are older than 30 days. It must never reduce the set
+    # below three, and must preserve user-created .7z files with a similar prefix.
+    $retentionPath = Join-Path $testRoot "Retention Safety"
+    New-Item -ItemType Directory -Path $retentionPath -Force | Out-Null
+    $retentionDates = @(
+        "2000-01-01_00-00-00",
+        "2001-01-01_00-00-00",
+        "2002-01-01_00-00-00",
+        "2003-01-01_00-00-00",
+        "2004-01-01_00-00-00"
+    )
+    $retentionArchives = @()
+    for ($i = 0; $i -lt $retentionDates.Count; $i++) {
+        $id = "{0:x8}" -f ($i + 1)
+        $archiveName = "SmokeProfile_{0}_{1}.7z" -f $retentionDates[$i], $id
+        $archivePath = Join-Path $retentionPath $archiveName
+        Set-Content -LiteralPath $archivePath -Value "expired managed archive placeholder"
+        (Get-Item -LiteralPath $archivePath).LastWriteTime = (Get-Date).AddDays(-31)
+        $retentionArchives += $archivePath
+    }
+    $oldManualArchive = Join-Path $retentionPath "SmokeProfile_manual-export.7z"
     Set-Content -LiteralPath $oldManualArchive -Value "user archive placeholder"
-    (Get-Item -LiteralPath $oldManagedArchive).LastWriteTime = (Get-Date).AddDays(-31)
     (Get-Item -LiteralPath $oldManualArchive).LastWriteTime = (Get-Date).AddDays(-31)
 
     $retentionArguments = New-Object object[] 3
     $retentionArguments[0] = [string]"SmokeProfile"
-    $retentionArguments[1] = [string]$backupPath
+    $retentionArguments[1] = [string]$retentionPath
     $retentionArguments[2] = [string]$logPath
     $null = $retainOldBackups.Invoke([object]$null, $retentionArguments)
 
-    if (Test-Path -LiteralPath $oldManagedArchive) {
-        throw "An old application-managed archive was not removed by retention."
+    for ($i = 0; $i -lt 2; $i++) {
+        if (Test-Path -LiteralPath $retentionArchives[$i]) {
+            throw "Retention did not remove an expired managed archive older than the three newest copies."
+        }
+    }
+    for ($i = 2; $i -lt 5; $i++) {
+        if (-not (Test-Path -LiteralPath $retentionArchives[$i])) {
+            throw "Retention deleted one of the three newest managed archives."
+        }
     }
     if (-not (Test-Path -LiteralPath $oldManualArchive)) {
         throw "Retention deleted an unrelated user-created .7z file."
+    }
+
+    # Even if every archive is older than 30 days, fewer than three means no deletion.
+    $fewRetentionPath = Join-Path $testRoot "Retention Below Minimum"
+    New-Item -ItemType Directory -Path $fewRetentionPath -Force | Out-Null
+    $fewRetentionArchives = @(
+        "SmokeProfile_2000-01-01_00-00-00_000000a1.7z",
+        "SmokeProfile_2001-01-01_00-00-00_000000a2.7z"
+    )
+    foreach ($archiveName in $fewRetentionArchives) {
+        $archivePath = Join-Path $fewRetentionPath $archiveName
+        Set-Content -LiteralPath $archivePath -Value "only remaining archive placeholder"
+        (Get-Item -LiteralPath $archivePath).LastWriteTime = (Get-Date).AddDays(-31)
+    }
+
+    $retentionArguments[1] = [string]$fewRetentionPath
+    $null = $retainOldBackups.Invoke([object]$null, $retentionArguments)
+    foreach ($archiveName in $fewRetentionArchives) {
+        if (-not (Test-Path -LiteralPath (Join-Path $fewRetentionPath $archiveName))) {
+            throw "Retention deleted an archive while fewer than three managed copies existed."
+        }
     }
 
     Write-Host "PASS: unencrypted archive created, verified independently, and restored to a separate directory."
@@ -896,7 +940,7 @@ try {
     Write-Host "PASS: non-profile directories are rejected before output creation."
     Write-Host "PASS: profile junctions are rejected before archiving."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
-    Write-Host "PASS: retention removes expired managed archives and preserves unrelated .7z files."
+    Write-Host "PASS: retention keeps the three newest managed archives, removes only expired older copies, preserves user files, and never drops below three."
 }
 catch {
     if (Test-Path -LiteralPath $logPath) {

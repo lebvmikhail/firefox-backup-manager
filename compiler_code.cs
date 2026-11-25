@@ -924,7 +924,8 @@ class Program {
         }
     }
 
-    static bool IsManagedBackupFile(string fileName, string profileName) {
+    static bool TryGetManagedBackupTimestamp(string fileName, string profileName, out DateTime timestamp) {
+        timestamp = DateTime.MinValue;
         string prefix = MakeSafeFileName(profileName) + "_";
         string baseName = Path.GetFileNameWithoutExtension(fileName);
         if (!baseName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
@@ -934,32 +935,68 @@ class Program {
         string suffix = baseName.Substring(prefix.Length);
         if (suffix.Length != 28 || suffix[19] != '_') return false;
 
-        DateTime timestamp;
+        DateTime parsedTimestamp;
         if (!DateTime.TryParseExact(suffix.Substring(0, 19), "yyyy-MM-dd_HH-mm-ss",
-                                    CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
+                                    CultureInfo.InvariantCulture, DateTimeStyles.None, out parsedTimestamp))
             return false;
 
         string id = suffix.Substring(20);
         for (int i = 0; i < id.Length; i++)
             if (!Uri.IsHexDigit(id[i])) return false;
+
+        timestamp = parsedTimestamp;
         return true;
     }
 
+    static bool IsManagedBackupFile(string fileName, string profileName) {
+        DateTime ignoredTimestamp;
+        return TryGetManagedBackupTimestamp(fileName, profileName, out ignoredTimestamp);
+    }
+
     static void RetainOldBackups(string profileName, string backupDir, string logFile) {
+        const int minimumRetainedBackups = 3;
         try {
             DateTime cutoff = DateTime.Now.AddDays(-30);
             DirectoryInfo directory = new DirectoryInfo(backupDir);
-            foreach (FileInfo file in directory.GetFiles("*.7z")) {
-                if (!IsManagedBackupFile(file.Name, profileName)) continue;
-                if (file.LastWriteTime < cutoff) {
-                    try {
-                        file.Delete();
-                        AppendLogWithRotation(logFile, string.Format("[{0}] [РОТАЦИЯ] Удалена старая копия: {1}\r\n",
-                            DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), file.Name));
-                    } catch (Exception ex) {
-                        AppendLogWithRotation(logFile, "[ПРЕДУПРЕЖДЕНИЕ] Не удалось удалить старую копию " +
-                                              file.Name + ": " + ex.Message + "\r\n");
-                    }
+            FileInfo[] files = directory.GetFiles("*.7z");
+            List<KeyValuePair<DateTime, FileInfo>> managedFiles =
+                new List<KeyValuePair<DateTime, FileInfo>>();
+
+            // Build the complete candidate set before deleting anything. If enumeration
+            // or metadata inspection fails, the outer handler skips the whole rotation.
+            foreach (FileInfo file in files) {
+                DateTime backupTimestamp;
+                if (TryGetManagedBackupTimestamp(file.Name, profileName, out backupTimestamp))
+                    managedFiles.Add(new KeyValuePair<DateTime, FileInfo>(backupTimestamp, file));
+            }
+
+            // The timestamp embedded in the generated filename defines backup order.
+            // A stable filename tie-breaker handles multiple backups made in one second.
+            managedFiles.Sort(delegate(KeyValuePair<DateTime, FileInfo> left,
+                                       KeyValuePair<DateTime, FileInfo> right) {
+                int timestampOrder = right.Key.CompareTo(left.Key);
+                if (timestampOrder != 0) return timestampOrder;
+                return StringComparer.OrdinalIgnoreCase.Compare(left.Value.Name, right.Value.Name);
+            });
+
+            int protectedCount = Math.Min(minimumRetainedBackups, managedFiles.Count);
+            List<FileInfo> expiredFiles = new List<FileInfo>();
+
+            // Determine every deletion candidate before the first delete. The newest
+            // three application-managed archives are protected regardless of age.
+            for (int i = protectedCount; i < managedFiles.Count; i++) {
+                FileInfo file = managedFiles[i].Value;
+                if (file.LastWriteTime < cutoff) expiredFiles.Add(file);
+            }
+
+            foreach (FileInfo file in expiredFiles) {
+                try {
+                    file.Delete();
+                    AppendLogWithRotation(logFile, string.Format("[{0}] [РОТАЦИЯ] Удалена старая копия: {1}\r\n",
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), file.Name));
+                } catch (Exception ex) {
+                    AppendLogWithRotation(logFile, "[ПРЕДУПРЕЖДЕНИЕ] Не удалось удалить старую копию " +
+                                          file.Name + ": " + ex.Message + "\r\n");
                 }
             }
         } catch (Exception ex) {
