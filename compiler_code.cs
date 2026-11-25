@@ -909,10 +909,14 @@ class Program {
                 return false;
             }
 
-            byte[] protectedPassword = Convert.FromBase64String(encryptedPassword);
-            if (protectedPassword.Length == 0 || protectedPassword.Length > 16384) {
-                error = "DPAPI-значение пароля имеет недопустимый размер.";
-                return false;
+            // Empty is the documented "no archive password" setting.
+            // Non-empty values must contain a bounded DPAPI payload.
+            if (!string.IsNullOrEmpty(encryptedPassword)) {
+                byte[] protectedPassword = Convert.FromBase64String(encryptedPassword);
+                if (protectedPassword.Length == 0 || protectedPassword.Length > 16384) {
+                    error = "DPAPI-значение пароля имеет недопустимый размер.";
+                    return false;
+                }
             }
             return true;
         } catch (FormatException) {
