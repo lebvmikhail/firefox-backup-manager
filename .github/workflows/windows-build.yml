@@ -44,6 +44,20 @@ jobs:
           "$hash  Firefox_Backup_Manager.exe" |
             Set-Content -Encoding ascii (Join-Path $env:GITHUB_WORKSPACE "SHA256SUMS.txt")
 
+      - name: Install 7-Zip for integration smoke tests
+        shell: pwsh
+        run: |
+          choco install 7zip --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip installation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Run backup-engine smoke tests
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "Firefox_Backup_Manager.exe"
+          & (Join-Path $env:GITHUB_WORKSPACE "tests/SmokeTest.ps1") -ExePath $exe
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
