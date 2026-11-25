@@ -115,6 +115,23 @@ try {
         throw "The config parser returned unexpected values for a valid configuration."
     }
 
+    # An intentionally empty password is valid; the key must still exist.
+    $emptyPasswordLines = @(
+        "ProfileName=SmokeProfile",
+        "ProfilePath=$profilePath",
+        "BackupDir=$backupPath",
+        "BackupPassword="
+    )
+    Set-Content -LiteralPath $configValidationPath -Value $emptyPasswordLines -Encoding UTF8
+    $emptyPasswordArguments = New-Object object[] 6
+    $emptyPasswordArguments[0] = [string]$configValidationPath
+    if (-not [bool]$tryReadBackupConfig.Invoke([object]$null, $emptyPasswordArguments)) {
+        throw "The config parser rejected an intentionally empty archive password: $($emptyPasswordArguments[5])"
+    }
+    if (-not [string]::IsNullOrEmpty([string]$emptyPasswordArguments[4])) {
+        throw "The config parser changed an intentionally empty archive password."
+    }
+
     $duplicateConfigLines = @(
         "ProfileName=SmokeProfile",
         "ProfileName=UnexpectedSecondValue",
