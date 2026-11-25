@@ -1054,7 +1054,13 @@ class Program {
         string output;
         string taskName = GetUserScheduledTaskName().Replace("'", "''");
         string executable = fullExecutablePath.Replace("'", "''");
-        string taskUser = (Environment.UserDomainName + "\\" + Environment.UserName).Replace("'", "''");
+        string taskUser;
+        try {
+            taskUser = GetCurrentUserName().Replace("'", "''");
+        } catch (Exception ex) {
+            error = "Не удалось определить текущую учётную запись для задачи Планировщика: " + ex.Message;
+            return false;
+        }
 
         // The task runs only in this user's interactive session, with LUA privileges.
         // It therefore has no more rights than the account that selected the destination.
@@ -1119,6 +1125,13 @@ class Program {
         if (identity == null || identity.User == null)
             throw new InvalidOperationException("Не удалось определить SID текущего пользователя.");
         return identity.User.Value;
+    }
+
+    static string GetCurrentUserName() {
+        WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        if (identity == null || string.IsNullOrEmpty(identity.Name))
+            throw new InvalidOperationException("Не удалось определить имя текущей учётной записи Windows.");
+        return identity.Name;
     }
 
     static void ApplyPrivateDirectorySecurity(string directoryPath) {
