@@ -1351,9 +1351,8 @@ class Program {
 
     [STAThread]
     static int Main(string[] args) {
-        Application.EnableVisualStyles();
         // No invocation mode may run backup or setup operations as LocalSystem.
-        // A legacy SYSTEM task exits before touching configuration or destination files.
+        // A legacy SYSTEM task exits before initializing the GUI or touching files.
         if (IsRunningAsSystem()) return 8;
 
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -1393,6 +1392,9 @@ class Program {
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), createdArchive));
             return 0;
         }
+
+        // The scheduled background path above does not need to initialize Windows Forms.
+        Application.EnableVisualStyles();
 
         // Never silently replace a task created by the previous SYSTEM-based release.
         // Its removal requires an explicit administrator action; old archives remain untouched.
