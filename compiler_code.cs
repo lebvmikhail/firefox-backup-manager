@@ -283,10 +283,10 @@ class Program {
 
                 List<string> testArguments = new List<string>();
                 testArguments.Add("t");
-                if (!string.IsNullOrEmpty(password)) {
-                    testArguments.Add("-p");
-                    testArguments.Add("-sccUTF-8");
-                }
+                // Do not pass "-p" without a value: 7-Zip interprets that as
+                // an empty password instead of prompting for the archive password.
+                // With no -p switch, 7-Zip prompts and reads the secret from stdin.
+                if (!string.IsNullOrEmpty(password)) testArguments.Add("-sccUTF-8");
                 testArguments.Add(temporaryArchive);
                 int testExitCode;
                 if (!Run7Zip(zip7, testArguments.ToArray(),
