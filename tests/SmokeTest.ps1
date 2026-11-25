@@ -18,6 +18,8 @@ $isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation",
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
 $ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 $tryReadBackupConfig = $programType.GetMethod("TryReadBackupConfig", $flags)
+$restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
+$isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -37,9 +39,15 @@ if ($null -eq $ensurePrivateConfig) {
 if ($null -eq $tryReadBackupConfig) {
     throw "TryReadBackupConfig method was not found in the application assembly."
 }
+if ($null -eq $restoreBackup) {
+    throw "RestoreBackup method was not found in the application assembly."
+}
+if ($null -eq $isSafeArchiveEntryPath) {
+    throw "IsSafeArchiveEntryPath method was not found in the application assembly."
+}
 
-$testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Tests " + [Guid]::NewGuid().ToString("N"))
-$profilePath = Join-Path $testRoot "Test Firefox Profile"
+$testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Ж [paths] & " + [Guid]::NewGuid().ToString("N"))
+$profilePath = Join-Path $testRoot "Test Firefox Profile Ж"
 $backupPath = Join-Path $testRoot "Backup Output"
 $logPath = Join-Path $backupPath "backup_log.txt"
 $password = "Smoke password with spaces; quotes " + '"' + " and backslash \ and unicode Ж"
@@ -60,6 +68,24 @@ function Invoke-BackupEngine {
         Success = $success
         Archive = [string]$arguments[5]
         Error = [string]$arguments[6]
+    }
+}
+
+function Invoke-RestoreEngine {
+    param(
+        [string]$Archive,
+        [string]$DestinationParent,
+        [string]$Secret,
+        [string]$Log
+    )
+
+    $arguments = [object[]]@($Archive, $DestinationParent, $Secret, $Log, "", "")
+    $success = [bool]$restoreBackup.Invoke($null, $arguments)
+
+    return [pscustomobject]@{
+        Success = $success
+        RestorePath = [string]$arguments[4]
+        Error = [string]$arguments[5]
     }
 }
 
@@ -136,8 +162,9 @@ try {
     Set-Content -LiteralPath (Join-Path $profilePath "prefs.js") -Value 'user_pref("browser.startup.homepage", "about:blank");'
     New-Item -ItemType Directory -Path (Join-Path $profilePath "storage") -Force | Out-Null
     Set-Content -LiteralPath (Join-Path (Join-Path $profilePath "storage") "example.txt") -Value "Nested file"
+    Set-Content -LiteralPath (Join-Path $profilePath "Unicode Ж [1] & data.txt") -Value "Unicode path and file name."
 
-    $plain = Invoke-BackupEngine "SmokeProfile" $profilePath $backupPath "" $logPath
+    $plain = Invoke-BackupEngine "Smoke Profile Ж" $profilePath $backupPath "" $logPath
     if (-not $plain.Success) {
         throw "Unencrypted archive creation failed: $($plain.Error)"
     }
@@ -145,7 +172,7 @@ try {
         throw "Unencrypted archive was not published."
     }
 
-    $encrypted = Invoke-BackupEngine "SmokeProfile" $profilePath $backupPath $password $logPath
+    $encrypted = Invoke-BackupEngine "Smoke Profile Ж" $profilePath $backupPath $password $logPath
     if (-not $encrypted.Success) {
         throw "Encrypted archive creation failed: $($encrypted.Error)"
     }
@@ -168,6 +195,40 @@ try {
         if ($logText.Contains($password)) {
             throw "The archive password was unexpectedly written to the backup log."
         }
+    }
+
+    # Restore both archive types into new directories; reject a wrong password and traversal paths.
+    $restoreParent = Join-Path $testRoot "Restore Output"
+    New-Item -ItemType Directory -Path $restoreParent -Force | Out-Null
+    $plainRestore = Invoke-RestoreEngine $plain.Archive $restoreParent "" (Join-Path $restoreParent "restore_log.txt")
+    if (-not $plainRestore.Success -or
+        -not (Test-Path -LiteralPath (Join-Path $plainRestore.RestorePath "places.sqlite"))) {
+        throw "Unencrypted archive restore failed: $($plainRestore.Error)"
+    }
+
+    $encryptedRestore = Invoke-RestoreEngine $encrypted.Archive $restoreParent $password (Join-Path $restoreParent "restore_log.txt")
+    if (-not $encryptedRestore.Success -or
+        -not (Test-Path -LiteralPath (Join-Path $encryptedRestore.RestorePath "places.sqlite")) -or
+        -not (Test-Path -LiteralPath (Join-Path $encryptedRestore.RestorePath "storage/example.txt"))) {
+        throw "Encrypted archive restore failed: $($encryptedRestore.Error)"
+    }
+
+    $wrongPasswordRestore = Invoke-RestoreEngine $encrypted.Archive $restoreParent "incorrect password" (Join-Path $restoreParent "restore_log.txt")
+    if ($wrongPasswordRestore.Success) {
+        throw "Restore unexpectedly succeeded with an incorrect password."
+    }
+    $leftoverStaging = @(Get-ChildItem -LiteralPath $restoreParent -Directory -Filter ".ffbm-restore-*")
+    if ($leftoverStaging.Count -ne 0) {
+        throw "A failed restore left temporary staging directories behind."
+    }
+
+    $unsafeArchivePathArguments = [object[]]@("..\outside.txt", $restoreParent, "")
+    if ([bool]$isSafeArchiveEntryPath.Invoke($null, $unsafeArchivePathArguments)) {
+        throw "Archive path validation accepted a parent-directory traversal."
+    }
+    $absoluteArchivePathArguments = [object[]]@("C:\outside.txt", $restoreParent, "")
+    if ([bool]$isSafeArchiveEntryPath.Invoke($null, $absoluteArchivePathArguments)) {
+        throw "Archive path validation accepted an absolute Windows path."
     }
 
     $insideProfile = Join-Path $profilePath "Backup Must Not Be Created Here"
@@ -209,11 +270,30 @@ try {
     $allowedConfigSids = @("S-1-5-18", "S-1-5-32-544")
     foreach ($aclPath in @($privateConfigDirectory, $privateConfigPath)) {
         $acl = Get-Acl -LiteralPath $aclPath
+        if (-not $acl.AreAccessRulesProtected) {
+            throw "Private config ACL still inherits permissions from its parent on $aclPath."
+        }
         $rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+        $observedAllowedSids = @()
         foreach ($rule in $rules) {
-            if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-                $rule.IdentityReference.Value -notin $allowedConfigSids) {
-                throw "Private config ACL grants access to unexpected SID $($rule.IdentityReference.Value) on $aclPath."
+            if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
+                $sid = $rule.IdentityReference.Value
+                if ($sid -notin $allowedConfigSids) {
+                    throw "Private config ACL grants access to unexpected SID $sid on $aclPath."
+                }
+                if ($rule.IsInherited) {
+                    throw "Private config ACL contains an inherited allow rule on $aclPath."
+                }
+                $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+                if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) {
+                    throw "Private config ACL does not grant full control to $sid on $aclPath."
+                }
+                $observedAllowedSids += $sid
+            }
+        }
+        foreach ($requiredSid in $allowedConfigSids) {
+            if ($observedAllowedSids -notcontains $requiredSid) {
+                throw "Private config ACL is missing required SID $requiredSid on $aclPath."
             }
         }
     }
@@ -267,9 +347,11 @@ try {
         throw "Retention deleted an unrelated user-created .7z file."
     }
 
-    Write-Host "PASS: unencrypted archive created and passed 7-Zip integrity test."
-    Write-Host "PASS: encrypted archive created and passed 7-Zip integrity test."
+    Write-Host "PASS: unencrypted archive created, tested, and restored to a separate directory."
+    Write-Host "PASS: encrypted archive with Unicode paths restored; wrong password rejected."
+    Write-Host "PASS: archive path traversal and absolute paths rejected before extraction."
     Write-Host "PASS: archive password does not appear in the application log."
+    Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
     Write-Host "PASS: destination inside the profile is rejected without creating a folder."
     Write-Host "PASS: retention removes expired managed archives and preserves unrelated .7z files."
 }
