@@ -499,6 +499,33 @@ class Program {
         }
     }
 
+
+    static void DeleteDirectoryNoFollow(string path) {
+        FileAttributes attributes;
+        try {
+            attributes = File.GetAttributes(path);
+        } catch (FileNotFoundException) {
+            return;
+        } catch (DirectoryNotFoundException) {
+            return;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0) {
+            // Delete the link itself; never recurse into its target.
+            if ((attributes & FileAttributes.Directory) != 0) Directory.Delete(path, false);
+            else File.Delete(path);
+            return;
+        }
+
+        if ((attributes & FileAttributes.Directory) != 0) {
+            foreach (string entry in Directory.GetFileSystemEntries(path))
+                DeleteDirectoryNoFollow(entry);
+            Directory.Delete(path, false);
+        } else {
+            File.Delete(path);
+        }
+    }
+
     static bool RestoreBackup(string archivePath, string restoreParent, string password, string logFile,
                               out string restoredPath, out string error) {
         restoredPath = "";
@@ -582,8 +609,8 @@ class Program {
             return false;
         } finally {
             try {
-                if (!string.IsNullOrEmpty(stagingDirectory) && Directory.Exists(stagingDirectory))
-                    Directory.Delete(stagingDirectory, true);
+                if (!string.IsNullOrEmpty(stagingDirectory))
+                    DeleteDirectoryNoFollow(stagingDirectory);
             } catch {}
         }
     }
