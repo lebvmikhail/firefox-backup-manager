@@ -1655,7 +1655,7 @@ class Program {
         btnDelete.Click += (s, e) => {
             int exitCode;
             string output, commandError;
-            bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+            bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", GetUserScheduledTaskName(), "/F"),
                                        30000, null, out exitCode, out output, out commandError);
             if (!launched || (exitCode != 0 && IsScheduledTaskRegistered())) {
                 MessageBox.Show("Не удалось подтвердить удаление задачи Планировщика. Конфигурация сохранена.\n\n" +
