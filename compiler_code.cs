@@ -71,8 +71,9 @@ class Program {
         }
     }
 
-    // Passwords are still passed to the 7-Zip CLI. Command-line secret exposure
-    // remains a known limitation for a later library/SDK-based security change.
+    // The password value is not included in command-line arguments. For
+    // password-protected operations, 7-Zip prompts and receives the secret
+    // through redirected UTF-8 standard input in RunProcess.
     static string QuoteArgument(string value) {
         StringBuilder result = new StringBuilder();
         result.Append('"');
