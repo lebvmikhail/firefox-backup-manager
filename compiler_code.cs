@@ -747,6 +747,8 @@ class Program {
                 error = "Путь к профилю содержит файловую ссылку: " + error;
                 return false;
             }
+            // Refuse before creating the destination directory or lock file if Firefox is open.
+            if (enforceFirefoxClosed && !EnsureFirefoxClosed(out error)) return false;
             Directory.CreateDirectory(fullBackupDir);
             if (!EnsurePathHasNoReparsePoints(fullBackupDir, out error)) {
                 error = "Путь для резервных копий содержит файловую ссылку: " + error;
