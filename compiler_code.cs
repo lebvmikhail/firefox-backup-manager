@@ -25,6 +25,8 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Xml;
+using System.Xml;
 
 class Program {
     static string regKeyName = "Firefox_Local_AutoBackup";
@@ -184,6 +186,21 @@ class Program {
         string candidate = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (string.Equals(parent, candidate, StringComparison.OrdinalIgnoreCase)) return true;
         return candidate.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // SYSTEM startup tasks must use binaries from the normally protected Program Files roots.
+    static bool IsProtectedProgramFilesLocation(string executablePath) {
+        try {
+            string candidate = Path.GetFullPath(executablePath);
+            string[] roots = new string[] {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+            };
+            foreach (string root in roots) {
+                if (!string.IsNullOrEmpty(root) && IsPathSameOrInside(root, candidate)) return true;
+            }
+        } catch {}
+        return false;
     }
 
     static string MakeSafeFileName(string value) {
@@ -369,7 +386,40 @@ class Program {
         return launched && exitCode == 0;
     }
 
+    static bool IsScheduledTaskUsingUnsafeExecutable() {
+        int exitCode; string output; string error;
+        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
+                                   30000, null, out exitCode, out output, out error);
+        if (!launched || exitCode != 0 || string.IsNullOrEmpty(output)) return true;
+        try {
+            XmlDocument document = new XmlDocument();
+            document.LoadXml(output);
+            XmlNamespaceManager namespaces = new XmlNamespaceManager(document.NameTable);
+            namespaces.AddNamespace("task", "http://schemas.microsoft.com/windows/2004/02/mit/task");
+            XmlNode commandNode = document.SelectSingleNode("//task:Actions/task:Exec/task:Command", namespaces);
+            return commandNode == null || !IsProtectedProgramFilesLocation(commandNode.InnerText);
+        } catch {
+            return true;
+        }
+    }
+
+    static bool RemoveScheduledTask(out string error) {
+        int exitCode; string output;
+        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+                                   30000, null, out exitCode, out output, out error);
+        if (!launched) return false;
+        if (IsScheduledTaskRegistered()) {
+            error = "Задача Планировщика всё ещё существует после команды удаления. " + output;
+            return false;
+        }
+        return true;
+    }
+
     static bool RegisterScheduledTask(string exePath, out string error) {
+        if (!IsProtectedProgramFilesLocation(exePath)) {
+            error = "Задача запускается от SYSTEM, поэтому EXE должен находиться в защищённом каталоге Program Files. Переместите Firefox_Backup_Manager.exe в Program Files и запустите его от имени администратора.";
+            return false;
+        }
         int exitCode;
         string output;
         string taskName = regKeyName.Replace("'", "''");
@@ -420,8 +470,15 @@ class Program {
         Application.EnableVisualStyles();
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
         string configFile = Path.Combine(currentDir, "config.ini");
+        string executablePath = Path.Combine(currentDir, "Firefox_Backup_Manager.exe");
+        bool protectedInstallLocation = IsProtectedProgramFilesLocation(executablePath);
         // РЕЖИМ 1: Фоновое резервное копирование при старте Windows.
         if (args.Length > 0 && args[0] == "--silent-backup") {
+            if (!protectedInstallLocation) {
+                string unsafeTaskRemovalError;
+                RemoveScheduledTask(out unsafeTaskRemovalError);
+                return 8;
+            }
             if (!File.Exists(configFile)) return 2;
             string profName = "", profPath = "", backupDir = "", encryptedPass = "";
             bool hasProfileName = false, hasProfilePath = false, hasBackupDir = false, hasPasswordKey = false;
@@ -475,6 +532,18 @@ class Program {
             return 0;
         }
 
+        // Remove an old SYSTEM task if its action still points to a user-writable path.
+        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeExecutable()) {
+            string taskRemovalError;
+            if (!RemoveScheduledTask(out taskRemovalError)) {
+                MessageBox.Show("Не удалось удалить старую небезопасную задачу SYSTEM. Удалите Firefox_Local_AutoBackup в Планировщике заданий вручную.\\n\\n" + taskRemovalError,
+                    "Предупреждение безопасности", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            } else {
+                MessageBox.Show("Старая задача SYSTEM ссылалась на EXE вне Program Files и была удалена. Настройте автозапуск заново после установки приложения в Program Files.",
+                    "Исправление безопасности", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         // РЕЖИМ 2: Интерактивное графическое меню настроек
         Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 260, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
         Label lblStatus = new Label() { Left = 20, Top = 20, Width = 400, Height = 60 };
@@ -497,6 +566,11 @@ class Program {
         Button btnDelete = new Button() { Text = "Отключить авто-бэкап и удалить конфиг", Left = 20, Top = 145, Width = 400, Height = 35 };
 
         btnSetup.Click += (s, e) => {
+            if (!protectedInstallLocation) {
+                MessageBox.Show("Для задачи SYSTEM переместите Firefox_Backup_Manager.exe в защищённый каталог Program Files, например C:\\Program Files\\Firefox Backup Manager, и запустите его от имени администратора.",
+                    "Требуется установка в Program Files", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
             string appDataRoaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string ffIni = Path.Combine(appDataRoaming, @"Mozilla\Firefox\profiles.ini");
             if (!File.Exists(ffIni)) {
