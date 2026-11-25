@@ -239,12 +239,18 @@ try {
         throw "A failed restore left temporary staging directories behind."
     }
 
-    $unsafeArchivePathArguments = [object[]]@("..\outside.txt", $restoreParent, "")
-    if ([bool]$isSafeArchiveEntryPath.Invoke($null, $unsafeArchivePathArguments)) {
+    $unsafeArchivePathArguments = New-Object object[] 3
+    $unsafeArchivePathArguments[0] = [string]"..\outside.txt"
+    $unsafeArchivePathArguments[1] = [string]$restoreParent
+    $unsafeArchivePathArguments[2] = [string]""
+    if ([bool]$isSafeArchiveEntryPath.Invoke([object]$null, $unsafeArchivePathArguments)) {
         throw "Archive path validation accepted a parent-directory traversal."
     }
-    $absoluteArchivePathArguments = [object[]]@("C:\outside.txt", $restoreParent, "")
-    if ([bool]$isSafeArchiveEntryPath.Invoke($null, $absoluteArchivePathArguments)) {
+    $absoluteArchivePathArguments = New-Object object[] 3
+    $absoluteArchivePathArguments[0] = [string]"C:\outside.txt"
+    $absoluteArchivePathArguments[1] = [string]$restoreParent
+    $absoluteArchivePathArguments[2] = [string]""
+    if ([bool]$isSafeArchiveEntryPath.Invoke([object]$null, $absoluteArchivePathArguments)) {
         throw "Archive path validation accepted an absolute Windows path."
     }
 
