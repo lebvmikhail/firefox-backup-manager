@@ -17,6 +17,8 @@ $createBackupWithGuard = $programType.GetMethod("CreateBackup", $flags)
 $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 $isLegacyTask = $programType.GetMethod("IsScheduledTaskUsingUnsafeSecurityContext", $flags)
 $getUserDataDirectory = $programType.GetMethod("GetUserDataDirectory", $flags)
+$getUserScheduledTaskName = $programType.GetMethod("GetUserScheduledTaskName", $flags)
+$isLegacyTaskPresent = $programType.GetMethod("IsLegacySystemTaskRegistered", $flags)
 $encryptPassword = $programType.GetMethod("EncryptPassword", $flags)
 $tryDecryptPassword = $programType.GetMethod("TryDecryptPassword", $flags)
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
@@ -75,7 +77,7 @@ if ($null -eq $getSystemExecutablePath) {
 if ($null -eq $isLegacyTask) {
     throw "IsScheduledTaskUsingUnsafeSecurityContext method was not found in the application assembly."
 }
-if ($null -eq $getUserDataDirectory -or $null -eq $encryptPassword -or $null -eq $tryDecryptPassword) {
+if ($null -eq $getUserDataDirectory -or $null -eq $getUserScheduledTaskName -or $null -eq $encryptPassword -or $null -eq $tryDecryptPassword -or $null -eq $isLegacyTaskPresent) {
     throw "Per-user config/DPAPI helper methods were not found in the application assembly."
 }
 if ($null -eq $prepareBackupDestination) {
@@ -616,7 +618,10 @@ try {
     }
 
     # Register a least-privilege task for the current interactive user.
-    $taskName = "Firefox_Local_AutoBackup"
+    $taskName = [string]$getUserScheduledTaskName.Invoke([object]$null, @())
+    if (-not $taskName.StartsWith("Firefox_Local_AutoBackup_", [StringComparison]::Ordinal)) {
+        throw "Per-user scheduled task name does not include the expected prefix: $taskName"
+    }
     $preExistingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($null -ne $preExistingTask) {
         throw "The CI runner already contains $taskName; refusing to replace an unrelated task."
