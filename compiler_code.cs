@@ -36,11 +36,39 @@ class Program {
             error = "Каталог профиля не существует или недоступен."; return false;
         }
         try {
-            string[] files = Directory.GetFiles(folderPath, "*", SearchOption.AllDirectories);
-            foreach (string file in files) size += new FileInfo(file).Length;
+            FileAttributes rootAttributes = File.GetAttributes(folderPath);
+            if ((rootAttributes & FileAttributes.ReparsePoint) != 0) {
+                error = "Каталог профиля является ссылкой/junction. Для безопасного резервирования выберите реальный каталог профиля.";
+                return false;
+            }
+
+            // Walk explicitly so directory junctions and symbolic links are not
+            // followed or silently included in a backup that RestoreBackup rejects.
+            Stack<string> pendingDirectories = new Stack<string>();
+            pendingDirectories.Push(folderPath);
+            while (pendingDirectories.Count > 0) {
+                string currentDirectory = pendingDirectories.Pop();
+                foreach (string entry in Directory.GetFileSystemEntries(currentDirectory)) {
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0) {
+                        error = "В профиле обнаружена символическая ссылка или junction: " +
+                                Path.GetFileName(entry) + ". Удалите ссылку или используйте обычную копию профиля.";
+                        size = 0;
+                        return false;
+                    }
+
+                    if ((attributes & FileAttributes.Directory) != 0) {
+                        pendingDirectories.Push(entry);
+                    } else {
+                        size = checked(size + new FileInfo(entry).Length);
+                    }
+                }
+            }
             return true;
         } catch (Exception ex) {
-            error = "Не удалось полностью определить размер профиля: " + ex.Message; return false;
+            size = 0;
+            error = "Не удалось полностью определить размер профиля: " + ex.Message;
+            return false;
         }
     }
 
@@ -646,6 +674,16 @@ class Program {
 
                 if (!EnsureFirefoxClosed(out error)) {
                     error = "Firefox был запущен во время резервного копирования. " + error; return false;
+                }
+                long verifiedProfileSize;
+                string verifiedProfileError;
+                if (!TryGetDirectorySize(fullProfilePath, out verifiedProfileSize, out verifiedProfileError)) {
+                    error = "Повторная проверка профиля перед публикацией не пройдена: " + verifiedProfileError;
+                    return false;
+                }
+                if (verifiedProfileSize != requiredSpace) {
+                    error = "Размер профиля изменился во время резервного копирования. Итоговый архив не опубликован; повторите операцию.";
+                    return false;
                 }
                 if (File.Exists(finalPath)) { error = "Итоговый файл уже существует; публикация отменена."; return false; }
                 File.Move(temporaryArchive, finalPath);
