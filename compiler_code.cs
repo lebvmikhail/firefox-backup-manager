@@ -385,6 +385,27 @@ class Program {
         return launched && exitCode == 0;
     }
 
+    static bool IsScheduledTaskUsingExecutable(string exePath) {
+        int exitCode; string output; string error;
+        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
+                                   30000, null, out exitCode, out output, out error);
+        if (!launched || exitCode != 0) return false;
+        string escapedPath = System.Security.SecurityElement.Escape(Path.GetFullPath(exePath));
+        return output.IndexOf(escapedPath, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    static bool RemoveScheduledTask(out string error) {
+        int exitCode; string output;
+        bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+                                   30000, null, out exitCode, out output, out error);
+        if (!launched) return false;
+        if (IsScheduledTaskRegistered()) {
+            error = "Задача Планировщика всё ещё существует после команды удаления. " + output;
+            return false;
+        }
+        return true;
+    }
+
     static bool RegisterScheduledTask(string exePath, out string error) {
         if (!IsProtectedProgramFilesLocation(exePath)) {
             error = "Задача запускается от SYSTEM, поэтому EXE должен находиться в защищённом каталоге Program Files. Переместите Firefox_Backup_Manager.exe в Program Files и запустите его от имени администратора.";
