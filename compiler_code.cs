@@ -293,6 +293,7 @@ class Program {
 
             string deviceName = segment.Split('.')[0].ToUpperInvariant();
             if (deviceName == "CON" || deviceName == "PRN" || deviceName == "AUX" || deviceName == "NUL" ||
+                deviceName == "CONIN$" || deviceName == "CONOUT$" ||
                 (deviceName.Length == 4 && (deviceName.StartsWith("COM", StringComparison.Ordinal) ||
                                             deviceName.StartsWith("LPT", StringComparison.Ordinal)) &&
                  deviceName[3] >= '1' && deviceName[3] <= '9')) {
