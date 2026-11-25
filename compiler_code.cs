@@ -29,7 +29,7 @@ using System.Xml;
 using System.Security.Principal;
 
 class Program {
-    static string regKeyName = "Firefox_Local_AutoBackup";
+    static string legacyRegKeyName = "Firefox_Local_AutoBackup";
     
     static bool TryGetDirectorySize(string folderPath, out long size, out string error) {
         size = 0; error = "";
@@ -248,6 +248,12 @@ class Program {
         if (string.IsNullOrEmpty(localAppData))
             throw new InvalidOperationException("Не удалось определить LocalAppData текущего пользователя.");
         return Path.Combine(localAppData, "Firefox Backup Manager");
+    }
+
+    // Task Scheduler task names are global within a Windows installation.
+    // Include this account's SID so multiple Windows users can configure backups independently.
+    static string GetUserScheduledTaskName() {
+        return "Firefox_Local_AutoBackup_" + GetCurrentUserSid().Replace("-", "");
     }
 
     static bool IsRunningAsSystem() {
@@ -957,18 +963,22 @@ class Program {
         return candidate;
     }
 
-    static bool IsScheduledTaskRegistered() {
+    static bool IsScheduledTaskRegistered(string taskName) {
         int exitCode; string output; string error;
-        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", regKeyName),
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", taskName),
                                    30000, null, out exitCode, out output, out error);
         return launched && exitCode == 0;
     }
 
-    // Old releases created a SYSTEM task. The new model only accepts an interactive
-    // task for the current account with the least-privileged run level.
-    static bool IsScheduledTaskUsingUnsafeSecurityContext() {
+    static bool IsScheduledTaskRegistered() {
+        return IsScheduledTaskRegistered(GetUserScheduledTaskName());
+    }
+
+    // Old releases used the fixed task name Firefox_Local_AutoBackup and ran as SYSTEM.
+    // The per-user task name is unique to the account and must use an interactive limited token.
+    static bool IsScheduledTaskUsingUnsafeSecurityContext(string taskName, bool requireCurrentUser) {
         int exitCode; string output; string error;
-        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Query", "/TN", taskName, "/XML"),
                                    30000, null, out exitCode, out output, out error);
         if (!launched || exitCode != 0 || string.IsNullOrEmpty(output)) return true;
         try {
@@ -990,22 +1000,35 @@ class Program {
             if (!string.Equals(configuredLogon, "InteractiveToken", StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(configuredRunLevel, "LeastPrivilege", StringComparison.OrdinalIgnoreCase)) return true;
 
-            WindowsIdentity identity = WindowsIdentity.GetCurrent();
-            string currentName = identity == null ? "" : identity.Name;
-            string currentSid = identity == null || identity.User == null ? "" : identity.User.Value;
-            return !string.Equals(configuredUser, currentName, StringComparison.OrdinalIgnoreCase) &&
-                   !string.Equals(configuredUser, currentSid, StringComparison.OrdinalIgnoreCase);
+            if (requireCurrentUser) {
+                WindowsIdentity identity = WindowsIdentity.GetCurrent();
+                string currentName = identity == null ? "" : identity.Name;
+                string currentSid = identity == null || identity.User == null ? "" : identity.User.Value;
+                if (!string.Equals(configuredUser, currentName, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(configuredUser, currentSid, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
         } catch {
             return true;
         }
     }
 
+    static bool IsScheduledTaskUsingUnsafeSecurityContext() {
+        return IsScheduledTaskUsingUnsafeSecurityContext(GetUserScheduledTaskName(), true);
+    }
+
+    static bool IsLegacySystemTaskRegistered() {
+        if (!IsScheduledTaskRegistered(legacyRegKeyName)) return false;
+        return IsScheduledTaskUsingUnsafeSecurityContext(legacyRegKeyName, false);
+    }
+
     static bool RemoveScheduledTask(out string error) {
         int exitCode; string output;
-        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", regKeyName, "/F"),
+        string taskName = GetUserScheduledTaskName();
+        bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", taskName, "/F"),
                                    30000, null, out exitCode, out output, out error);
         if (!launched) return false;
-        if (IsScheduledTaskRegistered()) {
+        if (IsScheduledTaskRegistered(taskName)) {
             error = "Задача Планировщика всё ещё существует после команды удаления. " + output;
             return false;
         }
@@ -1029,7 +1052,7 @@ class Program {
 
         int exitCode;
         string output;
-        string taskName = regKeyName.Replace("'", "''");
+        string taskName = GetUserScheduledTaskName().Replace("'", "''");
         string executable = fullExecutablePath.Replace("'", "''");
         string taskUser = (Environment.UserDomainName + "\\" + Environment.UserName).Replace("'", "''");
 
@@ -1336,7 +1359,7 @@ class Program {
 
         // Never silently replace a task created by the previous SYSTEM-based release.
         // Its removal requires an explicit administrator action; old archives remain untouched.
-        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeSecurityContext()) {
+        if (IsLegacySystemTaskRegistered()) {
             MessageBox.Show(
                 "Обнаружена задача Firefox Backup Manager старой версии, работающая от SYSTEM. " +
                 "Новая версия больше не использует SYSTEM для резервного копирования.\\n\\n" +
