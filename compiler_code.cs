@@ -252,7 +252,7 @@ class Program {
                 if (string.IsNullOrEmpty(zip7)) { error = "7-Zip не найден. Установите 7-Zip и повторите операцию."; return false; }
 
                 string safeProfileName = MakeSafeFileName(profileName);
-                string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
                 string unique = Guid.NewGuid().ToString("N").Substring(0, 8);
                 string finalName = safeProfileName + "_" + stamp + "_" + unique + ".7z";
                 string finalPath = Path.Combine(fullBackupDir, finalName);
