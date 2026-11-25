@@ -424,7 +424,14 @@ try {
             }
 
             $guardBackupPath = Join-Path $testRoot "Guarded Backup Output"
-            $guardArguments = [object[]]@("Smoke Profile Ж", $profilePath, $guardBackupPath, "", $logPath, "", "")
+            $guardArguments = New-Object object[] 7
+            $guardArguments[0] = [string]"Smoke Profile Ж"
+            $guardArguments[1] = [string]$profilePath
+            $guardArguments[2] = [string]$guardBackupPath
+            $guardArguments[3] = [string]""
+            $guardArguments[4] = [string]$logPath
+            $guardArguments[5] = [string]""
+            $guardArguments[6] = [string]""
             if ([bool]$createBackupWithGuard.Invoke([object]$null, $guardArguments)) {
                 throw "Production CreateBackup wrapper did not block while firefox.exe was running."
             }
