@@ -1615,9 +1615,22 @@ class Program {
             
             if (profForm.ShowDialog() != DialogResult.OK) return;
 			
-            string[] selectedData = listBox.SelectedItem.ToString().Split(new string[] { " | " }, StringSplitOptions.None);
-            string chosenName = selectedData[0].Trim();
-            string chosenPath = selectedData[1].Trim();
+            string selectedProfile = listBox.SelectedItem.ToString();
+            int profileSeparator = selectedProfile.LastIndexOf(" | ", StringComparison.Ordinal);
+            if (profileSeparator <= 0 || profileSeparator + 3 >= selectedProfile.Length) {
+                MessageBox.Show("Не удалось разобрать выбранный профиль Firefox. Обновите список профилей и повторите попытку.",
+                    "Ошибка выбора профиля", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            // Windows file names cannot contain '|', while a Firefox profile name can.
+            // Split at the final delimiter so names containing " | " remain intact.
+            string chosenName = selectedProfile.Substring(0, profileSeparator).Trim();
+            string chosenPath = selectedProfile.Substring(profileSeparator + 3).Trim();
+            if (string.IsNullOrEmpty(chosenName) || string.IsNullOrEmpty(chosenPath)) {
+                MessageBox.Show("Имя или путь выбранного профиля Firefox пусты.",
+                    "Ошибка выбора профиля", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             FolderBrowserDialog fbd = new FolderBrowserDialog() { Description = "ШАГ 2 из 3: Выберите папку для сохранения архивов" };
             if (fbd.ShowDialog() != DialogResult.OK) return;
@@ -1698,13 +1711,10 @@ class Program {
         };
 
         btnDelete.Click += (s, e) => {
-            int exitCode;
-            string output, commandError;
-            bool launched = RunProcess(GetSystemExecutablePath("schtasks.exe"), BuildCommandLine("/Delete", "/TN", GetUserScheduledTaskName(), "/F"),
-                                       30000, null, out exitCode, out output, out commandError);
-            if (!launched || (exitCode != 0 && IsScheduledTaskRegistered())) {
+            string commandError;
+            if (!RemoveScheduledTask(out commandError)) {
                 MessageBox.Show("Не удалось подтвердить удаление задачи Планировщика. Конфигурация сохранена.\n\n" +
-                    (string.IsNullOrEmpty(commandError) ? output : commandError),
+                    commandError,
                     "Ошибка отключения", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
