@@ -53,7 +53,9 @@ jobs:
           }
 
       - name: Run backup-engine smoke tests
-        shell: pwsh
+        # The product is compiled for .NET Framework; run reflection-based tests
+        # under Windows PowerShell 5.1 on the matching .NET Framework runtime.
+        shell: powershell
         run: |
           $exe = Join-Path $env:GITHUB_WORKSPACE "Firefox_Backup_Manager.exe"
           & (Join-Path $env:GITHUB_WORKSPACE "tests/SmokeTest.ps1") -ExePath $exe
