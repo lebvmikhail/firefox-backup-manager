@@ -17,6 +17,7 @@ $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 $isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation", $flags)
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
 $ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
+$tryReadBackupConfig = $programType.GetMethod("TryReadBackupConfig", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -32,6 +33,9 @@ if ($null -eq $registerScheduledTask) {
 }
 if ($null -eq $ensurePrivateConfig) {
     throw "EnsurePrivateConfigDirectory method was not found in the application assembly."
+}
+if ($null -eq $tryReadBackupConfig) {
+    throw "TryReadBackupConfig method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Tests " + [Guid]::NewGuid().ToString("N"))
@@ -62,6 +66,68 @@ function Invoke-BackupEngine {
 try {
     New-Item -ItemType Directory -Path $profilePath -Force | Out-Null
     New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+
+    # Config parsing must reject duplicate keys, relative paths and malformed DPAPI payloads.
+    $configValidationPath = Join-Path $testRoot "config-validation.ini"
+    $validConfigLines = @(
+        "ProfileName=SmokeProfile",
+        "ProfilePath=$profilePath",
+        "BackupDir=$backupPath",
+        "BackupPassword=U3ludGhldGljRG9QYVBJQmxvYg=="
+    )
+    Set-Content -LiteralPath $configValidationPath -Value $validConfigLines -Encoding UTF8
+
+    $validConfigArguments = New-Object object[] 6
+    $validConfigArguments[0] = [string]$configValidationPath
+    $validConfigResult = [bool]$tryReadBackupConfig.Invoke([object]$null, $validConfigArguments)
+    if (-not $validConfigResult) {
+        throw "A valid configuration was rejected: $($validConfigArguments[5])"
+    }
+    if ([string]$validConfigArguments[1] -ne "SmokeProfile" -or
+        [string]$validConfigArguments[2] -ne [System.IO.Path]::GetFullPath($profilePath) -or
+        [string]$validConfigArguments[3] -ne [System.IO.Path]::GetFullPath($backupPath)) {
+        throw "The config parser returned unexpected values for a valid configuration."
+    }
+
+    $duplicateConfigLines = @(
+        "ProfileName=SmokeProfile",
+        "ProfileName=UnexpectedSecondValue",
+        "ProfilePath=$profilePath",
+        "BackupDir=$backupPath",
+        "BackupPassword=U3ludGhldGljRG9QYVBJQmxvYg=="
+    )
+    Set-Content -LiteralPath $configValidationPath -Value $duplicateConfigLines -Encoding UTF8
+    $invalidConfigArguments = New-Object object[] 6
+    $invalidConfigArguments[0] = [string]$configValidationPath
+    if ([bool]$tryReadBackupConfig.Invoke([object]$null, $invalidConfigArguments)) {
+        throw "The config parser accepted a duplicate ProfileName key."
+    }
+
+    $relativeConfigLines = @(
+        "ProfileName=SmokeProfile",
+        "ProfilePath=relative-profile",
+        "BackupDir=$backupPath",
+        "BackupPassword=U3ludGhldGljRG9QYVBJQmxvYg=="
+    )
+    Set-Content -LiteralPath $configValidationPath -Value $relativeConfigLines -Encoding UTF8
+    $invalidConfigArguments = New-Object object[] 6
+    $invalidConfigArguments[0] = [string]$configValidationPath
+    if ([bool]$tryReadBackupConfig.Invoke([object]$null, $invalidConfigArguments)) {
+        throw "The config parser accepted a relative profile path."
+    }
+
+    $badPasswordConfigLines = @(
+        "ProfileName=SmokeProfile",
+        "ProfilePath=$profilePath",
+        "BackupDir=$backupPath",
+        "BackupPassword=this-is-not-base64"
+    )
+    Set-Content -LiteralPath $configValidationPath -Value $badPasswordConfigLines -Encoding UTF8
+    $invalidConfigArguments = New-Object object[] 6
+    $invalidConfigArguments[0] = [string]$configValidationPath
+    if ([bool]$tryReadBackupConfig.Invoke([object]$null, $invalidConfigArguments)) {
+        throw "The config parser accepted a malformed DPAPI payload."
+    }
 
     # Representative files only: this is an archive-engine smoke test, not a
     # real Firefox-profile compatibility or restore test.
