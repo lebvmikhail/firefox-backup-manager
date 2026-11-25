@@ -622,6 +622,10 @@ try {
     if (-not $taskName.StartsWith("Firefox_Local_AutoBackup_", [StringComparison]::Ordinal)) {
         throw "Per-user scheduled task name does not include the expected prefix: $taskName"
     }
+    $expectedTaskName = "Firefox_Local_AutoBackup_" + $currentUserSid.Replace("-", "")
+    if ($taskName -ne $expectedTaskName) {
+        throw "Scheduled task name does not match the current user's SID: $taskName"
+    }
     if ([bool]$isLegacyTaskPresent.Invoke([object]$null, @())) {
         throw "A legacy SYSTEM task is already registered on this CI runner; refusing to continue."
     }
