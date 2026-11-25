@@ -495,7 +495,7 @@ class Program {
         RunIcacls(filePath, new string[] {
             "/inheritance:r", "/grant:r",
             "*S-1-5-18:F", "*S-1-5-32-544:F",
-            "/setowner", "*S-1-5-32-544", "/Q"
+            "/Q"
         });
     }
 
