@@ -338,26 +338,77 @@ class Program {
 
         bool archivePathSkipped = false;
         bool isSevenZipArchive = false;
+        bool haveCurrentEntry = false;
+        bool currentIsFolder = false;
+        bool currentSizeSeen = false;
         int entryCount = 0;
-        string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        long totalUncompressedSize = 0;
+        HashSet<string> entryPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string[] lines = output.Split(new string[] { "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+
         foreach (string line in lines) {
             if (line.StartsWith("Type = ", StringComparison.Ordinal) &&
                 string.Equals(line.Substring("Type = ".Length).Trim(), "7z", StringComparison.OrdinalIgnoreCase))
                 isSevenZipArchive = true;
 
             if (line.StartsWith("Path = ", StringComparison.Ordinal)) {
-                string entryPath = line.Substring("Path = ".Length);
-                // The first Path field describes the archive itself; later ones are its entries.
                 if (!archivePathSkipped) {
+                    // The first Path field describes the archive itself.
                     archivePathSkipped = true;
                     continue;
                 }
+
+                if (haveCurrentEntry && !currentIsFolder && !currentSizeSeen) {
+                    error = "В списке архива отсутствует размер одного из файлов.";
+                    return false;
+                }
+
+                string entryPath = line.Substring("Path = ".Length);
                 string pathError;
                 if (!IsSafeArchiveEntryPath(entryPath, extractionRoot, out pathError)) {
                     error = "Небезопасное содержимое архива: " + pathError;
                     return false;
                 }
+
+                string normalizedPath = Path.GetFullPath(Path.Combine(
+                    extractionRoot, entryPath.Replace('/', (char)92)));
+                if (!entryPaths.Add(normalizedPath)) {
+                    error = "В архиве обнаружены повторяющиеся имена файлов или каталогов.";
+                    return false;
+                }
+
                 entryCount++;
+                if (entryCount > 100000) {
+                    error = "В архиве слишком много объектов (более 100 000); восстановление отменено.";
+                    return false;
+                }
+
+                haveCurrentEntry = true;
+                currentIsFolder = false;
+                currentSizeSeen = false;
+                continue;
+            }
+
+            if (line.StartsWith("Folder = ", StringComparison.Ordinal)) {
+                currentIsFolder = string.Equals(
+                    line.Substring("Folder = ".Length).Trim(), "+", StringComparison.Ordinal);
+            }
+
+            if (line.StartsWith("Size = ", StringComparison.Ordinal)) {
+                string rawSize = line.Substring("Size = ".Length).Trim();
+                long entrySize;
+                if (!haveCurrentEntry ||
+                    !long.TryParse(rawSize, NumberStyles.None, CultureInfo.InvariantCulture, out entrySize) ||
+                    entrySize < 0) {
+                    error = "В архиве обнаружен некорректный размер файла.";
+                    return false;
+                }
+                if (entrySize > long.MaxValue - totalUncompressedSize) {
+                    error = "Суммарный размер файлов в архиве превышает поддерживаемый диапазон.";
+                    return false;
+                }
+                totalUncompressedSize += entrySize;
+                currentSizeSeen = true;
             }
 
             if (line.StartsWith("Symbolic Link = ", StringComparison.Ordinal) ||
@@ -367,10 +418,31 @@ class Program {
             }
         }
 
+        if (haveCurrentEntry && !currentIsFolder && !currentSizeSeen) {
+            error = "В списке архива отсутствует размер одного из файлов.";
+            return false;
+        }
         if (!archivePathSkipped || !isSevenZipArchive || entryCount == 0) {
             error = "Архив пуст, повреждён или не является архивом формата 7z.";
             return false;
         }
+
+        try {
+            string targetRoot = Path.GetPathRoot(extractionRoot);
+            if (string.IsNullOrEmpty(targetRoot)) {
+                error = "Не удалось определить целевой диск для восстановления.";
+                return false;
+            }
+            DriveInfo targetDrive = new DriveInfo(targetRoot);
+            if (!targetDrive.IsReady || totalUncompressedSize > targetDrive.AvailableFreeSpace) {
+                error = "Для восстановления недостаточно свободного места на целевом диске.";
+                return false;
+            }
+        } catch (Exception ex) {
+            error = "Не удалось проверить свободное место для восстановления: " + ex.Message;
+            return false;
+        }
+
         return true;
     }
 
