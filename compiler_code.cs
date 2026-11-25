@@ -348,7 +348,7 @@ class Program {
     }
 
     static bool ValidateArchiveEntries(string zip7, string archivePath, string password,
-                                       string extractionRoot, out string error) {
+                                       string extractionRoot, bool checkFreeSpace, out string error) {
         error = "";
         int exitCode;
         string output;
@@ -371,6 +371,7 @@ class Program {
         bool currentIsFolder = false;
         bool currentSizeSeen = false;
         int entryCount = 0;
+        bool hasProfileMarker = false;
         long totalUncompressedSize = 0;
         HashSet<string> entryPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string[] lines = output.Split(new string[] { "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
@@ -393,6 +394,11 @@ class Program {
                 }
 
                 string entryPath = line.Substring("Path = ".Length);
+                string normalizedEntryName = entryPath.Replace('/', (char)92);
+                if (string.Equals(normalizedEntryName, "places.sqlite", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(normalizedEntryName, "logins.json", StringComparison.OrdinalIgnoreCase))
+                    hasProfileMarker = true;
+
                 string pathError;
                 if (!IsSafeArchiveEntryPath(entryPath, extractionRoot, out pathError)) {
                     error = "Небезопасное содержимое архива: " + pathError;
@@ -455,7 +461,12 @@ class Program {
             error = "Архив пуст, повреждён или не является архивом формата 7z.";
             return false;
         }
+        if (!hasProfileMarker) {
+            error = "В архиве не найден корневой файл places.sqlite или logins.json; он не похож на резервную копию профиля Firefox.";
+            return false;
+        }
 
+        if (checkFreeSpace) {
         try {
             string targetRoot = Path.GetPathRoot(extractionRoot);
             if (string.IsNullOrEmpty(targetRoot)) {
@@ -471,8 +482,52 @@ class Program {
             error = "Не удалось проверить свободное место для восстановления: " + ex.Message;
             return false;
         }
+        }
 
         return true;
+    }
+
+
+    static bool VerifyBackupArchive(string archivePath, string password, out string error) {
+        error = "";
+        string temporaryLog = "";
+        try {
+            if (string.IsNullOrEmpty(archivePath) || !File.Exists(archivePath)) {
+                error = "Выбранный архив не существует или недоступен.";
+                return false;
+            }
+            if (!string.Equals(Path.GetExtension(archivePath), ".7z", StringComparison.OrdinalIgnoreCase)) {
+                error = "Выберите архив с расширением .7z.";
+                return false;
+            }
+
+            string zip7 = Find7Zip();
+            if (string.IsNullOrEmpty(zip7)) {
+                error = "7-Zip не найден. Установите 7-Zip и повторите операцию.";
+                return false;
+            }
+
+            string fullArchivePath = Path.GetFullPath(archivePath);
+            if (!ValidateArchiveEntries(zip7, fullArchivePath, password, Path.GetTempPath(), false, out error))
+                return false;
+
+            temporaryLog = Path.Combine(Path.GetTempPath(), "ffbm-verify-" + Guid.NewGuid().ToString("N") + ".log");
+            int testExitCode;
+            if (!Run7Zip(zip7, new string[] { "t", "-sccUTF-8", fullArchivePath },
+                         password ?? "", temporaryLog, out testExitCode, out error)) {
+                error = "Проверка архива не пройдена. Проверьте пароль и целостность файла. " + error;
+                return false;
+            }
+            return true;
+        } catch (Exception ex) {
+            error = "Ошибка проверки резервной копии: " + ex.Message;
+            return false;
+        } finally {
+            try {
+                if (!string.IsNullOrEmpty(temporaryLog) && File.Exists(temporaryLog))
+                    File.Delete(temporaryLog);
+            } catch {}
+        }
     }
 
     static bool EnsureNoReparsePoints(string rootPath, out string error) {
@@ -556,7 +611,7 @@ class Program {
             stagingDirectory = Path.Combine(fullRestoreParent, ".ffbm-restore-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(stagingDirectory);
 
-            if (!ValidateArchiveEntries(zip7, fullArchivePath, password, stagingDirectory, out error))
+            if (!ValidateArchiveEntries(zip7, fullArchivePath, password, stagingDirectory, true, out error))
                 return false;
 
             int testExitCode;
@@ -1145,7 +1200,7 @@ class Program {
         }
 
         // РЕЖИМ 2: Интерактивное графическое меню настроек
-        Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 310, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
+        Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 355, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
         Label lblStatus = new Label() { Left = 20, Top = 20, Width = 400, Height = 60 };
         
         if (File.Exists(configFile)) {
@@ -1164,6 +1219,7 @@ class Program {
         Button btnSetup = new Button() { Text = "Включить / Настроить авто-бэкап", Left = 20, Top = 100, Width = 400, Height = 35 };
         Button btnDelete = new Button() { Text = "Отключить авто-бэкап и удалить конфиг", Left = 20, Top = 145, Width = 400, Height = 35 };
         Button btnRestore = new Button() { Text = "Восстановить архив в отдельную папку", Left = 20, Top = 190, Width = 400, Height = 35 };
+        Button btnVerify = new Button() { Text = "Проверить архив", Left = 20, Top = 235, Width = 400, Height = 35 };
 
         btnRestore.Click += (s, e) => {
             OpenFileDialog archiveDialog = new OpenFileDialog();
@@ -1209,6 +1265,46 @@ class Program {
             } else {
                 MessageBox.Show("Восстановление отменено. Исходные файлы не изменялись.\n\n" + restoreError,
                     "Ошибка восстановления", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
+
+        btnVerify.Click += (s, e) => {
+            OpenFileDialog verifyDialog = new OpenFileDialog();
+            verifyDialog.Title = "Выберите резервную копию Firefox для проверки";
+            verifyDialog.Filter = "Архивы 7-Zip (*.7z)|*.7z";
+            verifyDialog.CheckFileExists = true;
+            verifyDialog.Multiselect = false;
+            if (verifyDialog.ShowDialog() != DialogResult.OK) return;
+
+            Form verifyPasswordForm = new Form() {
+                Text = "Пароль резервной копии",
+                Width = 410, Height = 175, StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false
+            };
+            Label verifyPasswordLabel = new Label() {
+                Text = "Пароль архива (для незашифрованной копии оставьте поле пустым):",
+                Left = 15, Top = 15, Width = 365, Height = 35
+            };
+            TextBox verifyPasswordBox = new TextBox() {
+                Left = 15, Top = 55, Width = 365, PasswordChar = '*'
+            };
+            Button verifyPasswordOk = new Button() {
+                Text = "Проверить", Left = 270, Top = 95, Width = 110, Height = 30,
+                DialogResult = DialogResult.OK
+            };
+            verifyPasswordForm.Controls.AddRange(new Control[] {
+                verifyPasswordLabel, verifyPasswordBox, verifyPasswordOk
+            });
+            verifyPasswordForm.AcceptButton = verifyPasswordOk;
+            if (verifyPasswordForm.ShowDialog() != DialogResult.OK) return;
+
+            string verifyError;
+            if (VerifyBackupArchive(verifyDialog.FileName, verifyPasswordBox.Text, out verifyError)) {
+                MessageBox.Show("Архив прошёл проверку структуры и целостности 7-Zip. Распаковка не выполнялась.",
+                    "Проверка завершена", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            } else {
+                MessageBox.Show("Проверка архива не пройдена.\\n\\n" + verifyError,
+                    "Ошибка проверки", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
 
@@ -1409,7 +1505,7 @@ class Program {
             menuForm.Close();
         };
 
-        menuForm.Controls.AddRange(new Control[] { lblStatus, btnSetup, btnDelete, btnRestore });
+        menuForm.Controls.AddRange(new Control[] { lblStatus, btnSetup, btnDelete, btnRestore, btnVerify });
         Application.Run(menuForm);
         return 0;
     }
