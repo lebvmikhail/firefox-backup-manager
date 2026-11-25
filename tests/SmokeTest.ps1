@@ -22,6 +22,8 @@ $restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
 $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
 $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
+$isScheduledTaskRegistered = $programType.GetMethod("IsScheduledTaskRegistered", $flags)
+$isScheduledTaskUnsafe = $programType.GetMethod("IsScheduledTaskUsingUnsafeExecutable", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -52,6 +54,9 @@ if ($null -eq $ensureFirefoxClosed) {
 }
 if ($null -eq $removeScheduledTask) {
     throw "RemoveScheduledTask method was not found in the application assembly."
+}
+if ($null -eq $isScheduledTaskRegistered -or $null -eq $isScheduledTaskUnsafe) {
+    throw "Scheduled-task inspection methods were not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Ж [paths] & " + [Guid]::NewGuid().ToString("N"))
@@ -465,6 +470,63 @@ try {
         if (Test-Path -LiteralPath $ciInstallDirectory) {
             Remove-Item -LiteralPath $ciInstallDirectory -Recurse -Force
         }
+    }
+
+    # Exercise real Windows Task Scheduler registration, XML contents and cleanup.
+    # The hosted Windows runner is disposable; always remove the test task in finally.
+    $scheduledTaskWasPresent = [bool]$isScheduledTaskRegistered.Invoke([object]$null, @())
+    if ($scheduledTaskWasPresent) {
+        throw "The CI runner already contains Firefox_Local_AutoBackup; refusing to overwrite an unknown task."
+    }
+
+    $safeExePath = Join-Path $env:ProgramFiles "Firefox Backup Manager\Firefox_Backup_Manager.exe"
+    $safeRegisterArguments = New-Object object[] 2
+    $safeRegisterArguments[0] = [string]$safeExePath
+    $safeRegisterArguments[1] = [string]""
+    try {
+        $registered = [bool]$registerScheduledTask.Invoke([object]$null, $safeRegisterArguments)
+        if (-not $registered) {
+            throw "RegisterScheduledTask failed for Program Files path: $($safeRegisterArguments[1])"
+        }
+        if (-not [bool]$isScheduledTaskRegistered.Invoke([object]$null, @())) {
+            throw "Task Scheduler did not report the test task after registration."
+        }
+        if ([bool]$isScheduledTaskUnsafe.Invoke([object]$null, @())) {
+            throw "The registered task XML points outside Program Files or could not be inspected."
+        }
+
+        $taskXmlText = (& schtasks.exe /Query /TN "Firefox_Local_AutoBackup" /XML 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not query registered task XML: $taskXmlText"
+        }
+        [xml]$taskXml = $taskXmlText
+        $taskNs = New-Object System.Xml.XmlNamespaceManager($taskXml.NameTable)
+        $taskNs.AddNamespace("task", "http://schemas.microsoft.com/windows/2004/02/mit/task")
+        $taskPrincipal = $taskXml.SelectSingleNode("//task:Principals/task:Principal/task:UserId", $taskNs)
+        $taskCommand = $taskXml.SelectSingleNode("//task:Actions/task:Exec/task:Command", $taskNs)
+        $taskArgs = $taskXml.SelectSingleNode("//task:Actions/task:Exec/task:Arguments", $taskNs)
+        if ($null -eq $taskPrincipal -or $taskPrincipal.InnerText -notin @("S-1-5-18", "SYSTEM")) {
+            throw "The scheduled task does not use the LocalSystem principal."
+        }
+        if ($null -eq $taskCommand -or
+            [System.IO.Path]::GetFullPath($taskCommand.InnerText) -ne [System.IO.Path]::GetFullPath($safeExePath)) {
+            throw "The scheduled task action does not reference the exact expected executable."
+        }
+        if ($null -eq $taskArgs -or $taskArgs.InnerText -ne "--silent-backup") {
+            throw "The scheduled task arguments are not --silent-backup."
+        }
+    }
+    finally {
+        $removeArguments = New-Object object[] 1
+        $removeArguments[0] = [string]""
+        $removed = [bool]$removeScheduledTask.Invoke([object]$null, $removeArguments)
+        if (-not $removed) {
+            throw "Failed to remove integration-test scheduled task: $($removeArguments[0])"
+        }
+    }
+
+    if ([bool]$isScheduledTaskRegistered.Invoke([object]$null, @())) {
+        throw "The integration-test scheduled task still exists after cleanup."
     }
 
     # Retention must remove only files matching the application's own archive
