@@ -15,6 +15,7 @@ $flags = [System.Reflection.BindingFlags]::Static -bor [System.Reflection.Bindin
 $createBackup = $programType.GetMethod("CreateBackup", $flags)
 $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 $isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation", $flags)
+$registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -24,6 +25,9 @@ if ($null -eq $retainOldBackups) {
 }
 if ($null -eq $isProtectedLocation) {
     throw "IsProtectedProgramFilesLocation method was not found in the application assembly."
+}
+if ($null -eq $registerScheduledTask) {
+    throw "RegisterScheduledTask method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Tests " + [Guid]::NewGuid().ToString("N"))
@@ -106,6 +110,18 @@ try {
     }
 
     # The SYSTEM task may only execute from the standard protected Program Files roots.
+    # The registration method itself must fail closed before launching PowerShell.
+    $registerArguments = New-Object object[] 2
+    $registerArguments[0] = [string]$ExePath
+    $registerArguments[1] = [string]""
+    $registrationResult = [bool]$registerScheduledTask.Invoke([object]$null, $registerArguments)
+    if ($registrationResult) {
+        throw "RegisterScheduledTask accepted an executable outside Program Files."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$registerArguments[1])) {
+        throw "RegisterScheduledTask rejected the writable path without explaining the reason."
+    }
+
     $unsafePathArguments = New-Object object[] 1
     $unsafePathArguments[0] = [string]$ExePath
     $unsafePathResult = [bool]$isProtectedLocation.Invoke([object]$null, $unsafePathArguments)
