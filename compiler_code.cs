@@ -1371,6 +1371,18 @@ class Program {
             return 11;
         }
 
+        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeSecurityContext()) {
+            string unsafeTaskName = GetUserScheduledTaskName();
+            MessageBox.Show(
+                "Найдена задача с именем текущей учётной записи, но её XML не подтверждает " +
+                "запуск от имени текущего пользователя с InteractiveToken и LeastPrivilege. " +
+                "Новая версия не будет автоматически заменять такую задачу.\\n\\n" +
+                "Проверьте задачу в Планировщике. Если она устарела, удалите её командой:\\n" +
+                "schtasks /Delete /TN \"" + unsafeTaskName + "\" /F",
+                "Небезопасная задача автозапуска", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 12;
+        }
+
         string configError;
         if (!EnsurePrivateConfigDirectory(userDataDirectory, out configFile, out configError)) {
             MessageBox.Show(configError + "\\n\\nАвтозапуск не будет настроен, пока пользовательская конфигурация не защищена.",
