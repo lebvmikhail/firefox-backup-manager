@@ -52,7 +52,7 @@
 
 ## Автоматическая проверка
 
-GitHub Actions собирает приложение на Windows runner, устанавливает 7-Zip, проверяет создание, отдельную проверку и восстановление синтетических архивов, неверный пароль, повреждённый архив, опасные пути, безопасную очистку junction, DACL конфигурации, DPAPI CurrentUser, отказ при работающем `firefox.exe` и фактическую регистрацию, запуск и удаление пользовательской задачи с `InteractiveToken` и `LeastPrivilege`. Workflow запускается при push в `development` и при pull request в `main` или `development`. Результат конкретного запуска следует проверять на странице [GitHub Actions](https://github.com/lebvmikhail/firefox-backup-manager/actions/workflows/windows-build.yml).
+GitHub Actions собирает приложение на Windows runner, находит или устанавливает 7-Zip и проверяет его версию, затем проверяет создание, отдельную проверку и восстановление синтетических архивов, неверный пароль, повреждённый архив, опасные пути, безопасную очистку junction, DACL конфигурации, DPAPI CurrentUser, отказ при работающем `firefox.exe` и фактическую регистрацию, запуск и удаление пользовательской задачи с `InteractiveToken` и `LeastPrivilege`. Workflow запускается при push в `main` и `development`, а также при pull request в эти ветки. Результат конкретного запуска следует проверять на странице [GitHub Actions](https://github.com/lebvmikhail/firefox-backup-manager/actions/workflows/windows-build.yml).
 
 Smoke-тест использует синтетический набор файлов, включая заглушки `places.sqlite` и `logins.json`. Он подтверждает работу архивного движка и сценария распаковки, но не совместимость с настоящим профилем, корректность базы SQLite или успешный запуск восстановленного Firefox.
 

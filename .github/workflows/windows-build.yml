@@ -3,6 +3,7 @@ name: Windows build
 on:
   push:
     branches:
+      - main
       - development
   pull_request:
     branches:
@@ -17,10 +18,11 @@ jobs:
   build:
     name: Compile Firefox Backup Manager
     runs-on: windows-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Compile with .NET Framework C# compiler
         shell: pwsh
@@ -36,7 +38,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = Join-Path $env:GITHUB_WORKSPACE "Firefox_Backup_Manager.exe"
-          if (-not (Test-Path $exe)) {
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
             throw "Build output Firefox_Backup_Manager.exe was not created."
           }
 
@@ -44,13 +46,57 @@ jobs:
           "$hash  Firefox_Backup_Manager.exe" |
             Set-Content -Encoding ascii (Join-Path $env:GITHUB_WORKSPACE "SHA256SUMS.txt")
 
-      - name: Install 7-Zip for integration smoke tests
+      - name: Locate or install and verify 7-Zip
         shell: pwsh
         run: |
-          choco install 7zip --yes --no-progress
-          if ($LASTEXITCODE -ne 0) {
-            throw "7-Zip installation failed with exit code $LASTEXITCODE"
+          $programRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+          $sevenZipCandidates = @(
+            $programRoots | ForEach-Object {
+              Join-Path $_ "7-Zip\7z.exe"
+            } | Where-Object {
+              Test-Path -LiteralPath $_ -PathType Leaf
+            }
+          )
+
+          if ($sevenZipCandidates.Count -eq 0) {
+            choco install 7zip --yes --no-progress
+            $installExitCode = $LASTEXITCODE
+
+            $sevenZipCandidates = @(
+              $programRoots | ForEach-Object {
+                Join-Path $_ "7-Zip\7z.exe"
+              } | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+              }
+            )
+
+            if ($sevenZipCandidates.Count -eq 0) {
+              throw "7-Zip is unavailable. Chocolatey exit code: $installExitCode"
+            }
+
+            if ($installExitCode -ne 0) {
+              Write-Warning "Chocolatey returned exit code $installExitCode, but a usable 7z.exe is present."
+            }
           }
+
+          $sevenZip = $sevenZipCandidates[0]
+          $sevenZipInfo = @(& $sevenZip i 2>&1)
+          $sevenZipExitCode = $LASTEXITCODE
+          if ($sevenZipExitCode -ne 0) {
+            throw "7-Zip was found but its version query failed with exit code $sevenZipExitCode."
+          }
+
+          $versionLine = $sevenZipInfo |
+            Select-String -Pattern "^7-Zip " |
+            Select-Object -First 1
+          if ($null -eq $versionLine) {
+            throw "7-Zip version information was not found in the executable output."
+          }
+
+          Write-Host "Verified 7-Zip executable: $sevenZip"
+          Write-Host "Verified 7-Zip version: $($versionLine.Line)"
 
       - name: Run backup-engine smoke tests
         # The product is compiled for .NET Framework; run reflection-based tests
@@ -61,7 +107,7 @@ jobs:
           & (Join-Path $env:GITHUB_WORKSPACE "tests/SmokeTest.ps1") -ExePath $exe
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Firefox-Backup-Manager-windows
           path: |
