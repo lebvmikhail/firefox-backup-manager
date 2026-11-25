@@ -302,10 +302,13 @@ try {
 
     # Staging cleanup must remove a junction without deleting its external target.
     $cleanupRoot = Join-Path $testRoot "Staging Cleanup Junction"
+    $cleanupTarget = Join-Path $testRoot "Staging Cleanup Target"
     New-Item -ItemType Directory -Path $cleanupRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $cleanupTarget -Force | Out-Null
+    $cleanupTargetFile = Join-Path $cleanupTarget "outside.txt"
+    Set-Content -LiteralPath $cleanupTargetFile -Value "Must survive cleanup."
     $cleanupLink = Join-Path $cleanupRoot "external-link"
-    $cleanupTargetFile = Join-Path $junctionTarget "outside.txt"
-    $cleanupCommand = 'mklink /J "' + $cleanupLink + '" "' + $junctionTarget + '"'
+    $cleanupCommand = 'mklink /J "' + $cleanupLink + '" "' + $cleanupTarget + '"'
     & $env:ComSpec /c $cleanupCommand | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cleanupLink)) {
         throw "Could not create the staging cleanup test junction."
