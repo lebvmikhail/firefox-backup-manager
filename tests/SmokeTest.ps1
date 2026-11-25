@@ -34,6 +34,7 @@ $ensurePathHasNoReparsePoints = $programType.GetMethod("EnsurePathHasNoReparsePo
 $getSystemExecutablePath = $programType.GetMethod("GetSystemExecutablePath", $flags)
 $prepareBackupDestination = $programType.GetMethod("PrepareBackupDestination", $flags)
 $ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
+$writeConfigAtomic = $programType.GetMethod("WriteConfigAtomic", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackupCore method was not found in the application assembly."
@@ -88,6 +89,9 @@ if ($null -eq $removeScheduledTask) {
 }
 if ($null -eq $ensurePrivateConfigDirectory) {
     throw "EnsurePrivateConfigDirectory method was not found in the application assembly."
+}
+if ($null -eq $writeConfigAtomic) {
+    throw "WriteConfigAtomic method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Ж [paths] & " + [Guid]::NewGuid().ToString("N"))
@@ -593,9 +597,20 @@ try {
         throw "The migrated private config does not contain the original settings."
     }
 
+    # A config created by the normal setup path must receive a protected
+    # file DACL before the temporary file is atomically moved into place.
+    $atomicConfigPath = Join-Path $privateConfigDirectory "atomic-write-test.ini"
+    $atomicConfigArguments = New-Object object[] 3
+    $atomicConfigArguments[0] = [string]$atomicConfigPath
+    $atomicConfigArguments[1] = [string[]]@("ProfileName=AtomicAclTest", "BackupPassword=")
+    $atomicConfigArguments[2] = [string]""
+    if (-not [bool]$writeConfigAtomic.Invoke([object]$null, $atomicConfigArguments)) {
+        throw "WriteConfigAtomic failed while checking the config file DACL: $($atomicConfigArguments[2])"
+    }
+
     $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $allowedConfigSids = @($currentUserSid, "S-1-5-18", "S-1-5-32-544") | Select-Object -Unique
-    foreach ($aclPath in @($privateConfigDirectory, $privateConfigPath)) {
+    foreach ($aclPath in @($privateConfigDirectory, $privateConfigPath, $atomicConfigPath)) {
         $acl = Get-Acl -LiteralPath $aclPath
         if (-not $acl.AreAccessRulesProtected) {
             throw "Private config ACL still inherits permissions from its parent on $aclPath."
