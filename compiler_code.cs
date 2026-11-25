@@ -971,11 +971,14 @@ class Program {
             }
 
             // The timestamp embedded in the generated filename defines backup order.
-            // A stable filename tie-breaker handles multiple backups made in one second.
+            // LastWriteTime orders files created within the same one-second timestamp;
+            // the filename is the final deterministic tie-breaker.
             managedFiles.Sort(delegate(KeyValuePair<DateTime, FileInfo> left,
                                        KeyValuePair<DateTime, FileInfo> right) {
                 int timestampOrder = right.Key.CompareTo(left.Key);
                 if (timestampOrder != 0) return timestampOrder;
+                int writeTimeOrder = right.Value.LastWriteTime.CompareTo(left.Value.LastWriteTime);
+                if (writeTimeOrder != 0) return writeTimeOrder;
                 return StringComparer.OrdinalIgnoreCase.Compare(left.Value.Name, right.Value.Name);
             });
 
