@@ -19,6 +19,7 @@ $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
 $ensurePrivateConfig = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 $tryReadBackupConfig = $programType.GetMethod("TryReadBackupConfig", $flags)
 $restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
+$verifyBackupArchive = $programType.GetMethod("VerifyBackupArchive", $flags)
 $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
 $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
@@ -45,6 +46,9 @@ if ($null -eq $tryReadBackupConfig) {
 }
 if ($null -eq $restoreBackup) {
     throw "RestoreBackup method was not found in the application assembly."
+}
+if ($null -eq $verifyBackupArchive) {
+    throw "VerifyBackupArchive method was not found in the application assembly."
 }
 if ($null -eq $isSafeArchiveEntryPath) {
     throw "IsSafeArchiveEntryPath method was not found in the application assembly."
@@ -102,6 +106,24 @@ function Invoke-RestoreEngine {
         Success = $success
         RestorePath = [string]$arguments[4]
         Error = [string]$arguments[5]
+    }
+}
+
+function Invoke-VerifyEngine {
+    param(
+        [string]$Archive,
+        [string]$Secret
+    )
+
+    $arguments = New-Object object[] 3
+    $arguments[0] = [string]$Archive
+    $arguments[1] = [string]$Secret
+    $arguments[2] = [string]""
+    $success = [bool]$verifyBackupArchive.Invoke([object]$null, $arguments)
+
+    return [pscustomobject]@{
+        Success = $success
+        Error = [string]$arguments[2]
     }
 }
 
@@ -230,6 +252,24 @@ try {
         }
     }
 
+    # Check archives separately without extracting; wrong passwords must fail.
+    $plainVerify = Invoke-VerifyEngine $plain.Archive ""
+    if (-not $plainVerify.Success) {
+        throw "Unencrypted archive verification failed: $($plainVerify.Error)"
+    }
+    $encryptedVerify = Invoke-VerifyEngine $encrypted.Archive $password
+    if (-not $encryptedVerify.Success) {
+        throw "Encrypted archive verification failed: $($encryptedVerify.Error)"
+    }
+    $wrongVerify = Invoke-VerifyEngine $encrypted.Archive "incorrect password"
+    if ($wrongVerify.Success) {
+        throw "Standalone archive verification unexpectedly accepted an incorrect password."
+    }
+    $verifyTempLogs = @(Get-ChildItem -LiteralPath $env:TEMP -Filter "ffbm-verify-*.log" -File -ErrorAction SilentlyContinue)
+    if ($verifyTempLogs.Count -ne 0) {
+        throw "Standalone archive verification left temporary log files behind."
+    }
+
     # Restore both archive types into new directories; reject a wrong password and traversal paths.
     $restoreParent = Join-Path $testRoot "Restore Output"
     New-Item -ItemType Directory -Path $restoreParent -Force | Out-Null
@@ -271,6 +311,10 @@ try {
     $corruptRestore = Invoke-RestoreEngine $corruptArchive $restoreParent "" (Join-Path $restoreParent "restore_log.txt")
     if ($corruptRestore.Success) {
         throw "Restore unexpectedly succeeded with a corrupted archive."
+    }
+    $corruptVerify = Invoke-VerifyEngine $corruptArchive ""
+    if ($corruptVerify.Success) {
+        throw "Standalone archive verification unexpectedly accepted a corrupted archive."
     }
 
     $leftoverStaging = @(Get-ChildItem -LiteralPath $restoreParent -Directory -Filter ".ffbm-restore-*")
@@ -596,7 +640,8 @@ try {
         throw "Retention deleted an unrelated user-created .7z file."
     }
 
-    Write-Host "PASS: unencrypted archive created, tested, and restored to a separate directory."
+    Write-Host "PASS: unencrypted archive created, verified independently, and restored to a separate directory."
+    Write-Host "PASS: encrypted archive verified independently with a Unicode password; wrong password rejected."
     Write-Host "PASS: encrypted archive with Unicode paths restored; wrong password rejected."
     Write-Host "PASS: archive path traversal, absolute paths, and reserved device names rejected."
     Write-Host "PASS: corrupted archive and wrong password fail without leaving staging folders."
