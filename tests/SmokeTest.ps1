@@ -22,6 +22,7 @@ $restoreBackup = $programType.GetMethod("RestoreBackup", $flags)
 $isSafeArchiveEntryPath = $programType.GetMethod("IsSafeArchiveEntryPath", $flags)
 $ensureFirefoxClosed = $programType.GetMethod("EnsureFirefoxClosed", $flags)
 $removeScheduledTask = $programType.GetMethod("RemoveScheduledTask", $flags)
+$ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
     throw "CreateBackup method was not found in the application assembly."
@@ -52,6 +53,9 @@ if ($null -eq $ensureFirefoxClosed) {
 }
 if ($null -eq $removeScheduledTask) {
     throw "RemoveScheduledTask method was not found in the application assembly."
+}
+if ($null -eq $ensurePrivateConfigDirectory) {
+    throw "EnsurePrivateConfigDirectory method was not found in the application assembly."
 }
 
 $testRoot = Join-Path $env:TEMP ("Firefox Backup Manager Smoke Ж [paths] & " + [Guid]::NewGuid().ToString("N"))
@@ -469,6 +473,58 @@ try {
             throw "Scheduled task startup trigger is disabled."
         }
 
+        # Write a safe synthetic config and run the scheduled action as SYSTEM.
+        $systemBackupPath = Join-Path $testRoot "SYSTEM Backup Output"
+        New-Item -ItemType Directory -Path $systemBackupPath -Force | Out-Null
+        $privateConfigArguments = New-Object object[] 3
+        $privateConfigArguments[0] = [string]$ciInstallDirectory
+        $privateConfigArguments[1] = [string]""
+        $privateConfigArguments[2] = [string]""
+        if (-not [bool]$ensurePrivateConfigDirectory.Invoke([object]$null, $privateConfigArguments)) {
+            throw "Could not prepare the SYSTEM task's private config: $($privateConfigArguments[2])"
+        }
+        $systemConfigPath = [string]$privateConfigArguments[1]
+        $systemConfigLines = [string[]]@(
+            "ProfileName=SystemTaskSmoke",
+            "ProfilePath=$profilePath",
+            "BackupDir=$systemBackupPath",
+            "BackupPassword="
+        )
+        [System.IO.File]::WriteAllLines($systemConfigPath, $systemConfigLines, [System.Text.Encoding]::UTF8)
+
+        $previousTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+        $previousRunTime = $previousTaskInfo.LastRunTime
+        & (Join-Path $env:WINDIR "System32\schtasks.exe") /Run /TN $taskName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "schtasks /Run failed with exit code $LASTEXITCODE."
+        }
+
+        $taskDeadline = (Get-Date).AddSeconds(35)
+        $taskCompleted = $false
+        do {
+            Start-Sleep -Milliseconds 500
+            $currentTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            if ($currentTaskInfo.LastRunTime -gt $previousRunTime -and $currentTask.State -ne "Running") {
+                $taskCompleted = $true
+                break
+            }
+        } while ((Get-Date) -lt $taskDeadline)
+
+        if (-not $taskCompleted) {
+            throw "The SYSTEM backup task did not finish within 35 seconds."
+        }
+        if ([int]$currentTaskInfo.LastTaskResult -ne 0) {
+            throw "The SYSTEM backup task failed with result $($currentTaskInfo.LastTaskResult). Check backup_log.txt."
+        }
+        $systemArchives = @(Get-ChildItem -LiteralPath $systemBackupPath -Filter "SystemTaskSmoke_*.7z" -File)
+        if ($systemArchives.Count -ne 1) {
+            throw "The SYSTEM task did not publish exactly one verified archive."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $systemBackupPath "backup_log.txt"))) {
+            throw "The SYSTEM task did not create its backup log."
+        }
+
         $removeArguments = New-Object object[] 1
         $removeArguments[0] = [string]""
         if (-not [bool]$removeScheduledTask.Invoke([object]$null, $removeArguments)) {
@@ -518,7 +574,7 @@ try {
     Write-Host "PASS: archive path traversal, absolute paths, and reserved device names rejected."
     Write-Host "PASS: corrupted archive and wrong password fail without leaving staging folders."
     Write-Host "PASS: running firefox.exe blocks backup without terminating the process."
-    Write-Host "PASS: SYSTEM startup task registers with the expected action and settings, then removes cleanly."
+    Write-Host "PASS: SYSTEM startup task registers, runs the real background backup path, and removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
     Write-Host "PASS: profile junctions are rejected before archiving."
