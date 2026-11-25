@@ -716,6 +716,10 @@ class Program {
 
             stagingDirectory = Path.Combine(fullRestoreParent, ".ffbm-restore-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(stagingDirectory);
+            if (!EnsurePathHasNoReparsePoints(stagingDirectory, out pathValidationError)) {
+                error = "Временный каталог восстановления оказался в пути с файловой ссылкой: " + pathValidationError;
+                return false;
+            }
 
             if (!ValidateArchiveEntries(zip7, fullArchivePath, password, stagingDirectory, true, out error))
                 return false;
