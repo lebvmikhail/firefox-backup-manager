@@ -25,6 +25,7 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Xml;
 
 class Program {
     static string regKeyName = "Firefox_Local_AutoBackup";
