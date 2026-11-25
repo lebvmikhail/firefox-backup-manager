@@ -1332,15 +1332,8 @@ class Program {
     static int Main(string[] args) {
         Application.EnableVisualStyles();
         // No invocation mode may run backup or setup operations as LocalSystem.
-        // A legacy SYSTEM task exits silently before touching configuration or destination files.
-        if (IsRunningAsSystem()) {
-            if (args.Length > 0 && args[0] == "--silent-backup") return 8;
-            MessageBox.Show(
-                "Firefox Backup Manager не поддерживает интерактивную настройку или резервирование от имени SYSTEM. " +
-                "Запустите приложение обычным способом из учётной записи Windows, для которой настраивается резервирование.",
-                "Недопустимый контекст запуска", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return 8;
-        }
+        // A legacy SYSTEM task exits before touching configuration or destination files.
+        if (IsRunningAsSystem()) return 8;
 
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
         string userDataDirectory;
