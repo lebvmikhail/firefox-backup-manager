@@ -94,8 +94,8 @@ function Invoke-BackupEngine {
 
     return [pscustomobject]@{
         Success = $success
-        Archive = [string]$arguments[5]
-        Error = [string]$arguments[6]
+        Archive = [string]$arguments[6]
+        Error = [string]$arguments[7]
     }
 }
 
