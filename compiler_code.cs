@@ -339,7 +339,7 @@ class Program {
         bool archivePathSkipped = false;
         bool isSevenZipArchive = false;
         int entryCount = 0;
-        string[] lines = output.Split(new char[] { '\\r', '\\n' }, StringSplitOptions.RemoveEmptyEntries);
+        string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
         foreach (string line in lines) {
             if (line.StartsWith("Type = ", StringComparison.Ordinal) &&
                 string.Equals(line.Substring("Type = ".Length).Trim(), "7z", StringComparison.OrdinalIgnoreCase))
@@ -473,7 +473,7 @@ class Program {
             stagingDirectory = "";
             restoredPath = finalDirectory;
             AppendLogWithRotation(logFile, string.Format(
-                "[{0}] [ВОССТАНОВЛЕНИЕ] Архив проверен и распакован в отдельный каталог: {1}\\r\\n",
+                "[{0}] [ВОССТАНОВЛЕНИЕ] Архив проверен и распакован в отдельный каталог: {1}\r\n",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), finalDirectory));
             return true;
         } catch (Exception ex) {
