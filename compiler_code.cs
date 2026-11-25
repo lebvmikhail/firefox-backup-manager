@@ -324,17 +324,31 @@ class Program {
     }
 
     static bool RegisterScheduledTask(string exePath, out string error) {
-        int exitCode; string output;
-        bool launched = RunProcess("schtasks.exe",
-            BuildCommandLine("/Create", "/TN", regKeyName, "/TR", QuoteArgument(exePath) + " --silent-backup",
-                             "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"),
+        int exitCode;
+        string output;
+        string taskName = regKeyName.Replace("'", "''");
+        string executable = exePath.Replace("'", "''");
+
+        // Preserve the original battery-friendly settings while checking the
+        // PowerShell exit code and verifying that the task is actually present.
+        string command =
+            "$ErrorActionPreference = 'Stop'; try { " +
+            "$act = New-ScheduledTaskAction -Execute '" + executable + "' -Argument '--silent-backup'; " +
+            "$trig = New-ScheduledTaskTrigger -AtStartup; " +
+            "$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; " +
+            "Register-ScheduledTask -TaskName '" + taskName + "' -Action $act -Trigger $trig -Settings $set -User 'SYSTEM' -Force | Out-Null; " +
+            "exit 0 } catch { Write-Error $_; exit 1 }";
+
+        bool launched = RunProcess("powershell.exe",
+            BuildCommandLine("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command),
             30000, out exitCode, out output, out error);
+
         if (!launched || exitCode != 0) {
-            if (string.IsNullOrEmpty(error)) error = "schtasks.exe завершился с кодом " + exitCode + ". " + output;
+            if (string.IsNullOrEmpty(error)) error = "PowerShell не смог зарегистрировать задачу. " + output;
             return false;
         }
         if (!IsScheduledTaskRegistered()) {
-            error = "Команда создания завершилась успешно, но задача не найдена при контрольной проверке.";
+            error = "Команда регистрации завершилась успешно, но задача не найдена при контрольной проверке.";
             return false;
         }
         return true;
