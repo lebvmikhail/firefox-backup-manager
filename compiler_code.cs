@@ -211,10 +211,10 @@ class Program {
 
             string fullProfilePath = Path.GetFullPath(profilePath);
             string fullBackupDir = Path.GetFullPath(backupDir);
-            Directory.CreateDirectory(fullBackupDir);
             if (IsPathSameOrInside(fullProfilePath, fullBackupDir)) {
                 error = "Каталог резервных копий нельзя размещать внутри резервируемого профиля Firefox."; return false;
             }
+            Directory.CreateDirectory(fullBackupDir);
 
             long requiredSpace; string sizeError;
             if (!TryGetDirectorySize(fullProfilePath, out requiredSpace, out sizeError)) { error = sizeError; return false; }
