@@ -110,8 +110,11 @@ try {
     (Get-Item -LiteralPath $oldManagedArchive).LastWriteTime = (Get-Date).AddDays(-31)
     (Get-Item -LiteralPath $oldManualArchive).LastWriteTime = (Get-Date).AddDays(-31)
 
-    $retentionArguments = [object[]]@("SmokeProfile", $backupPath, $logPath)
-    $retainOldBackups.Invoke($null, $retentionArguments) | Out-Null
+    $retentionArguments = New-Object object[] 3
+    $retentionArguments[0] = [string]"SmokeProfile"
+    $retentionArguments[1] = [string]$backupPath
+    $retentionArguments[2] = [string]$logPath
+    $null = $retainOldBackups.Invoke([object]$null, $retentionArguments)
 
     if (Test-Path -LiteralPath $oldManagedArchive) {
         throw "An old application-managed archive was not removed by retention."
