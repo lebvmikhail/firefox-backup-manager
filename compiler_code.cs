@@ -714,6 +714,16 @@ class Program {
 
     static bool CreateBackup(string profileName, string profilePath, string backupDir,
                              string password, string logFile, out string archivePath, out string error) {
+        return CreateBackupCore(profileName, profilePath, backupDir, password, logFile, true,
+                                out archivePath, out error);
+    }
+
+    // The CI harness tests the archive engine independently of unrelated processes
+    // installed on hosted runners. Production entry points always use CreateBackup(),
+    // which enables both Firefox process checks.
+    static bool CreateBackupCore(string profileName, string profilePath, string backupDir,
+                                 string password, string logFile, bool enforceFirefoxClosed,
+                                 out string archivePath, out string error) {
         archivePath = ""; error = "";
         string temporaryArchive = ""; string excludeFile = "";
         try {
@@ -759,7 +769,7 @@ class Program {
             // Persistent exclusive lock prevents overlapping runs targeting this folder.
             string lockPath = Path.Combine(fullBackupDir, ".firefox-backup-manager.lock");
             using (FileStream backupLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) {
-                if (!EnsureFirefoxClosed(out error)) return false;
+                if (enforceFirefoxClosed && !EnsureFirefoxClosed(out error)) return false;
                 string zip7 = Find7Zip();
                 if (string.IsNullOrEmpty(zip7)) { error = "7-Zip не найден. Установите 7-Zip и повторите операцию."; return false; }
 
@@ -809,7 +819,7 @@ class Program {
                     error = "Проверка целостности нового архива не пройдена. " + error; return false;
                 }
 
-                if (!EnsureFirefoxClosed(out error)) {
+                if (enforceFirefoxClosed && !EnsureFirefoxClosed(out error)) {
                     error = "Firefox был запущен во время резервного копирования. " + error; return false;
                 }
                 string verifiedPathError;
