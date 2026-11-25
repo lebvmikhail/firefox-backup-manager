@@ -12,7 +12,8 @@ if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
 $assembly = [System.Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $ExePath).Path)
 $programType = $assembly.GetType("Program", $true)
 $flags = [System.Reflection.BindingFlags]::Static -bor [System.Reflection.BindingFlags]::NonPublic
-$createBackup = $programType.GetMethod("CreateBackup", $flags)
+$createBackup = $programType.GetMethod("CreateBackupCore", $flags)
+$createBackupWithGuard = $programType.GetMethod("CreateBackup", $flags)
 $retainOldBackups = $programType.GetMethod("RetainOldBackups", $flags)
 $isProtectedLocation = $programType.GetMethod("IsProtectedProgramFilesLocation", $flags)
 $registerScheduledTask = $programType.GetMethod("RegisterScheduledTask", $flags)
@@ -28,6 +29,9 @@ $ensurePathHasNoReparsePoints = $programType.GetMethod("EnsurePathHasNoReparsePo
 $ensurePrivateConfigDirectory = $programType.GetMethod("EnsurePrivateConfigDirectory", $flags)
 
 if ($null -eq $createBackup) {
+    throw "CreateBackupCore method was not found in the application assembly."
+}
+if ($null -eq $createBackupWithGuard) {
     throw "CreateBackup method was not found in the application assembly."
 }
 if ($null -eq $retainOldBackups) {
@@ -85,7 +89,7 @@ function Invoke-BackupEngine {
         [string]$Log
     )
 
-    $arguments = [object[]]@($ProfileName, $Profile, $Destination, $Secret, $Log, "", "")
+    $arguments = [object[]]@($ProfileName, $Profile, $Destination, $Secret, $Log, [bool]$false, "", "")
     $success = [bool]$createBackup.Invoke($null, $arguments)
 
     return [pscustomobject]@{
@@ -402,8 +406,10 @@ try {
         throw "No-follow staging cleanup deleted content outside the staging directory."
     }
 
-    # Simulate an open Firefox process without launching the real browser.
-    $fakeFirefoxPath = Join-Path $testRoot "firefox.exe"
+    # Verify the production wrapper refuses a backup while Firefox is running.
+    $firefoxPresentBeforeGuardTest = @(Get-Process -Name "firefox" -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $firefoxPresentBeforeGuardTest) {
+        $fakeFirefoxPath = Join-Path $testRoot "firefox.exe"
     Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\cmd.exe") -Destination $fakeFirefoxPath
     $fakeFirefox = Start-Process -FilePath $fakeFirefoxPath -ArgumentList @("/c", "ping -n 30 127.0.0.1 > nul") -PassThru -WindowStyle Hidden
     try {
@@ -417,10 +423,28 @@ try {
             throw "Firefox process guard returned no diagnostic message."
         }
     }
+        $guardBackupPath = Join-Path $testRoot "Guarded Backup Output"
+        $guardArguments = [object[]]@("Smoke Profile Ж", $profilePath, $guardBackupPath, "", $logPath, "", "")
+        if ([bool]$createBackupWithGuard.Invoke([object]$null, $guardArguments)) {
+            throw "Production CreateBackup wrapper did not block while firefox.exe was running."
+        }
+        if (Test-Path -LiteralPath $guardBackupPath) {
+            throw "Production CreateBackup wrapper created output despite a running Firefox process."
+        }
+    }
     finally {
         if (-not $fakeFirefox.HasExited) {
             Stop-Process -Id $fakeFirefox.Id -Force -ErrorAction SilentlyContinue
         }
+    }
+    }
+    else {
+        $firefoxGuardArguments = New-Object object[] 1
+        $firefoxGuardArguments[0] = [string]""
+        if ([bool]$ensureFirefoxClosed.Invoke([object]$null, $firefoxGuardArguments)) {
+            throw "Firefox process guard accepted a host that already has firefox.exe running."
+        }
+        Write-Host "SKIP: host Firefox was already running; the process guard rejected it without terminating it."
     }
 
     # A profile containing a directory junction must fail closed before 7-Zip starts.
@@ -598,6 +622,11 @@ try {
         )
         [System.IO.File]::WriteAllLines($systemConfigPath, $systemConfigLines, [System.Text.Encoding]::UTF8)
 
+        $hostFirefoxProcesses = @(Get-Process -Name "firefox" -ErrorAction SilentlyContinue)
+        if ($hostFirefoxProcesses.Count -gt 0) {
+            Write-Host "SKIP: SYSTEM task execution was not triggered because the hosted runner already has firefox.exe running; production guard correctly refuses backup."
+        }
+        else {
         $previousTaskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
         $previousRunTime = $previousTaskInfo.LastRunTime
         & (Join-Path $env:WINDIR "System32\schtasks.exe") /Run /TN $taskName | Out-Null
@@ -629,6 +658,7 @@ try {
         }
         if (-not (Test-Path -LiteralPath (Join-Path $systemBackupPath "backup_log.txt"))) {
             throw "The SYSTEM task did not create its backup log."
+        }
         }
 
         $removeArguments = New-Object object[] 1
@@ -681,7 +711,7 @@ try {
     Write-Host "PASS: archive path traversal, absolute paths, and reserved device names rejected."
     Write-Host "PASS: corrupted archive and wrong password fail without leaving staging folders."
     Write-Host "PASS: staging cleanup deletes a junction itself without touching its external target."
-    Write-Host "PASS: running firefox.exe blocks backup without terminating the process."
+    Write-Host "PASS: production backup entry point blocks when Firefox is running without terminating it."
     Write-Host "PASS: SYSTEM startup task registers, runs the real background backup path, and removes cleanly."
     Write-Host "PASS: archive password does not appear in the application log."
     Write-Host "PASS: private config migration applies explicit SYSTEM/Administrators-only ACL."
