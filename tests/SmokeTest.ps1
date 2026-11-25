@@ -374,6 +374,36 @@ try {
         throw "Encrypted archive restore failed: $($encryptedRestore.Error)"
     }
 
+    # Restore must reject a junction as the selected parent before creating
+    # a staging directory, writing a restore log, or extracting into its target.
+    $restoreJunctionTarget = Join-Path $testRoot "Restore Junction Target"
+    $restoreJunction = Join-Path $testRoot "Restore Parent Junction"
+    New-Item -ItemType Directory -Path $restoreJunctionTarget -Force | Out-Null
+    $restoreJunctionSentinel = Join-Path $restoreJunctionTarget "must-survive.txt"
+    Set-Content -LiteralPath $restoreJunctionSentinel -Value "Do not write through the junction."
+    $restoreJunctionCommand = 'mklink /J "' + $restoreJunction + '" "' + $restoreJunctionTarget + '"'
+    & $env:ComSpec /c $restoreJunctionCommand | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $restoreJunction)) {
+        throw "Could not create the restore-parent junction."
+    }
+    try {
+        $junctionRestoreLog = Join-Path $restoreJunction "restore_log.txt"
+        $junctionRestore = Invoke-RestoreEngine $plain.Archive $restoreJunction "" $junctionRestoreLog
+        if ($junctionRestore.Success) {
+            throw "Restore unexpectedly accepted a junction as its destination parent."
+        }
+        if (Test-Path -LiteralPath $junctionRestoreLog) {
+            throw "Restore wrote a log through the rejected destination junction."
+        }
+        if ((Get-ChildItem -LiteralPath $restoreJunctionTarget -Force).Count -ne 1 -or
+            -not (Test-Path -LiteralPath $restoreJunctionSentinel)) {
+            throw "Restore created or changed files through the rejected destination junction."
+        }
+    }
+    finally {
+        & $env:ComSpec /c ('rmdir "' + $restoreJunction + '"') | Out-Null
+    }
+
     $wrongPasswordRestore = Invoke-RestoreEngine $encrypted.Archive $restoreParent "incorrect password" (Join-Path $restoreParent "restore_log.txt")
     if ($wrongPasswordRestore.Success) {
         throw "Restore unexpectedly succeeded with an incorrect password."
