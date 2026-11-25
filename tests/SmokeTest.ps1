@@ -274,7 +274,7 @@ try {
         [Environment]::CurrentDirectory = $testRoot
         [System.IO.File]::WriteAllText((Join-Path $testRoot "schtasks.exe"), "not an executable")
         [System.IO.File]::WriteAllText((Join-Path $testRoot "powershell.exe"), "not an executable")
-        $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+        $systemDirectory = [Environment]::GetFolderPath([System.Environment+SpecialFolder]::System)
         $resolvedSchtasks = [string]$getSystemExecutablePath.Invoke([object]$null, [object[]]@("schtasks.exe"))
         $resolvedPowerShell = [string]$getSystemExecutablePath.Invoke([object]$null, [object[]]@("WindowsPowerShell\v1.0\powershell.exe"))
         if ([System.IO.Path]::GetFullPath($resolvedSchtasks) -ne [System.IO.Path]::GetFullPath((Join-Path $systemDirectory "schtasks.exe")) -or
