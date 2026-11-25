@@ -17,7 +17,7 @@ echo ^<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1"^>
 echo   ^<trustInfo xmlns="urn:schemas-microsoft-com:asm.v2"^>
 echo     ^<security^>
 echo       ^<requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3"^>
-echo         ^<requestedExecutionLevel level="requireAdministrator" uiAccess="false" /^>
+echo         ^<requestedExecutionLevel level="asInvoker" uiAccess="false" /^>
 echo       ^</requestedPrivileges^>
 echo     ^</security^>
 echo   ^</trustInfo^>
