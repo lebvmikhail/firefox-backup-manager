@@ -371,7 +371,7 @@ class Program {
                 }
 
                 string normalizedPath = Path.GetFullPath(Path.Combine(
-                    extractionRoot, entryPath.Replace('/', '\\\\')));
+                    extractionRoot, entryPath.Replace('/', (char)92)));
                 if (!entryPaths.Add(normalizedPath)) {
                     error = "В архиве обнаружены повторяющиеся имена файлов или каталогов.";
                     return false;
