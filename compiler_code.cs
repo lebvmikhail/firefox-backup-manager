@@ -186,6 +186,21 @@ class Program {
         return candidate.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
+    // SYSTEM startup tasks must use binaries from the normally protected Program Files roots.
+    static bool IsProtectedProgramFilesLocation(string executablePath) {
+        try {
+            string candidate = Path.GetFullPath(executablePath);
+            string[] roots = new string[] {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+            };
+            foreach (string root in roots) {
+                if (!string.IsNullOrEmpty(root) && IsPathSameOrInside(root, candidate)) return true;
+            }
+        } catch {}
+        return false;
+    }
+
     static string MakeSafeFileName(string value) {
         StringBuilder safe = new StringBuilder();
         char[] invalid = Path.GetInvalidFileNameChars();
