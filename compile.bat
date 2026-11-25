@@ -25,7 +25,7 @@ echo ^</assembly^>
 ) > "%MANIFEST_PATH%"
 
 echo [ПРОЦЕСС] Сборка Firefox Backup Manager...
-"%CSC_PATH%" /nologo /target:winexe /win32manifest:"%MANIFEST_PATH%" /out:"%OUTPUT_PATH%" "%~dp0compiler_code.cs" /reference:System.Windows.Forms.dll,System.dll,System.Drawing.dll,System.Core.dll,System.Security.dll
+"%CSC_PATH%" /nologo /target:winexe /win32manifest:"%MANIFEST_PATH%" /out:"%OUTPUT_PATH%" "%~dp0compiler_code.cs" /reference:System.Windows.Forms.dll,System.dll,System.Drawing.dll,System.Core.dll,System.Security.dll,System.Xml.dll
 set "BUILD_EXIT_CODE=%ERRORLEVEL%"
 
 del /q "%MANIFEST_PATH%" >nul 2>&1

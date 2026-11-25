@@ -26,6 +26,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Xml;
+using System.Xml;
 
 class Program {
     static string regKeyName = "Firefox_Local_AutoBackup";
@@ -385,13 +386,21 @@ class Program {
         return launched && exitCode == 0;
     }
 
-    static bool IsScheduledTaskUsingExecutable(string exePath) {
+    static bool IsScheduledTaskUsingUnsafeExecutable() {
         int exitCode; string output; string error;
         bool launched = RunProcess("schtasks.exe", BuildCommandLine("/Query", "/TN", regKeyName, "/XML"),
                                    30000, null, out exitCode, out output, out error);
-        if (!launched || exitCode != 0) return false;
-        string escapedPath = System.Security.SecurityElement.Escape(Path.GetFullPath(exePath));
-        return output.IndexOf(escapedPath, StringComparison.OrdinalIgnoreCase) >= 0;
+        if (!launched || exitCode != 0 || string.IsNullOrEmpty(output)) return true;
+        try {
+            XmlDocument document = new XmlDocument();
+            document.LoadXml(output);
+            XmlNamespaceManager namespaces = new XmlNamespaceManager(document.NameTable);
+            namespaces.AddNamespace("task", "http://schemas.microsoft.com/windows/2004/02/mit/task");
+            XmlNode commandNode = document.SelectSingleNode("//task:Actions/task:Exec/task:Command", namespaces);
+            return commandNode == null || !IsProtectedProgramFilesLocation(commandNode.InnerText);
+        } catch {
+            return true;
+        }
     }
 
     static bool RemoveScheduledTask(out string error) {
@@ -519,6 +528,18 @@ class Program {
             return 0;
         }
 
+        // Remove an old SYSTEM task if its action still points to a user-writable path.
+        if (IsScheduledTaskRegistered() && IsScheduledTaskUsingUnsafeExecutable()) {
+            string taskRemovalError;
+            if (!RemoveScheduledTask(out taskRemovalError)) {
+                MessageBox.Show("Не удалось удалить старую небезопасную задачу SYSTEM. Удалите Firefox_Local_AutoBackup в Планировщике заданий вручную.\\n\\n" + taskRemovalError,
+                    "Предупреждение безопасности", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            } else {
+                MessageBox.Show("Старая задача SYSTEM ссылалась на EXE вне Program Files и была удалена. Настройте автозапуск заново после установки приложения в Program Files.",
+                    "Исправление безопасности", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         // РЕЖИМ 2: Интерактивное графическое меню настроек
         Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 260, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
         Label lblStatus = new Label() { Left = 20, Top = 20, Width = 400, Height = 60 };
@@ -541,6 +562,11 @@ class Program {
         Button btnDelete = new Button() { Text = "Отключить авто-бэкап и удалить конфиг", Left = 20, Top = 145, Width = 400, Height = 35 };
 
         btnSetup.Click += (s, e) => {
+            if (!protectedInstallLocation) {
+                MessageBox.Show("Для задачи SYSTEM переместите Firefox_Backup_Manager.exe в защищённый каталог Program Files, например C:\\Program Files\\Firefox Backup Manager, и запустите его от имени администратора.",
+                    "Требуется установка в Program Files", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
             string appDataRoaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string ffIni = Path.Combine(appDataRoaming, @"Mozilla\Firefox\profiles.ini");
             if (!File.Exists(ffIni)) {
