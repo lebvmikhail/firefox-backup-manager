@@ -194,7 +194,11 @@ class Program {
                                    out exitCode, out output, out error);
         if (!string.IsNullOrEmpty(output)) AppendLogWithRotation(logFile, "\r\n[7-ZIP OUTPUT]:\r\n" + output);
         if (!launched) return false;
-        if (exitCode != 0) { error = "7-Zip завершился с кодом " + exitCode + "."; return false; }
+        if (exitCode != 0) {
+            error = "7-Zip завершился с кодом " + exitCode + "." +
+                    (string.IsNullOrEmpty(output) ? "" : " Вывод: " + output.Trim());
+            return false;
+        }
         return true;
     }
 
