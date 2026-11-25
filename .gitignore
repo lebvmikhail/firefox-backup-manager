@@ -1,0 +1,12 @@
+# Скомпилированные исполняемые файлы
+*.exe
+*.manifest
+*.MANIFEST
+
+# Личные файлы конфигурации и логи
+config.ini
+backup_log.txt
+*.7z
+
+# Временные файлы
+ff_excludes*.txt
