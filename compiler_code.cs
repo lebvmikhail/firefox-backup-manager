@@ -530,6 +530,48 @@ class Program {
         }
     }
 
+
+    static bool EnsurePathHasNoReparsePoints(string path, out string error) {
+        error = "";
+        try {
+            string fullPath = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root)) {
+                error = "Не удалось определить корневой каталог пути.";
+                return false;
+            }
+
+            string current = root;
+            FileAttributes rootAttributes = File.GetAttributes(current);
+            if ((rootAttributes & FileAttributes.ReparsePoint) != 0) {
+                error = "Путь проходит через точку подключения или другую файловую ссылку: " + current;
+                return false;
+            }
+
+            string remainder = fullPath.Substring(root.Length);
+            string[] segments = remainder.Split(new char[] {
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar
+            }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (string segment in segments) {
+                current = Path.Combine(current, segment);
+                if (!Directory.Exists(current) && !File.Exists(current)) {
+                    error = "Компонент пути не существует или недоступен: " + current;
+                    return false;
+                }
+                FileAttributes attributes = File.GetAttributes(current);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) {
+                    error = "Путь проходит через символическую ссылку или junction: " + current;
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception ex) {
+            error = "Не удалось проверить путь на наличие файловых ссылок: " + ex.Message;
+            return false;
+        }
+    }
+
     static bool EnsureNoReparsePoints(string rootPath, out string error) {
         error = "";
         try {
@@ -686,7 +728,20 @@ class Program {
             if (IsPathSameOrInside(fullProfilePath, fullBackupDir)) {
                 error = "Каталог резервных копий нельзя размещать внутри резервируемого профиля Firefox."; return false;
             }
+            if (!File.Exists(Path.Combine(fullProfilePath, "places.sqlite")) &&
+                !File.Exists(Path.Combine(fullProfilePath, "logins.json"))) {
+                error = "Выбранный каталог не похож на профиль Firefox: не найден корневой файл places.sqlite или logins.json.";
+                return false;
+            }
+            if (!EnsurePathHasNoReparsePoints(fullProfilePath, out error)) {
+                error = "Путь к профилю содержит файловую ссылку: " + error;
+                return false;
+            }
             Directory.CreateDirectory(fullBackupDir);
+            if (!EnsurePathHasNoReparsePoints(fullBackupDir, out error)) {
+                error = "Путь для резервных копий содержит файловую ссылку: " + error;
+                return false;
+            }
 
             long requiredSpace; string sizeError;
             if (!TryGetDirectorySize(fullProfilePath, out requiredSpace, out sizeError)) { error = sizeError; return false; }
@@ -756,6 +811,12 @@ class Program {
 
                 if (!EnsureFirefoxClosed(out error)) {
                     error = "Firefox был запущен во время резервного копирования. " + error; return false;
+                }
+                string verifiedPathError;
+                if (!EnsurePathHasNoReparsePoints(fullProfilePath, out verifiedPathError) ||
+                    !EnsurePathHasNoReparsePoints(fullBackupDir, out verifiedPathError)) {
+                    error = "Повторная проверка путей перед публикацией не пройдена: " + verifiedPathError;
+                    return false;
                 }
                 long verifiedProfileSize;
                 string verifiedProfileError;
