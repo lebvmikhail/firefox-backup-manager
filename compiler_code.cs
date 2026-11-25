@@ -1652,10 +1652,10 @@ class Program {
                 "BackupDir=" + chosenBackupDir,
                 "BackupPassword=" + securePasswordString
             };
-            string configError;
-            if (!WriteConfigAtomic(configFile, configLines, out configError)) {
+            string configWriteError;
+            if (!WriteConfigAtomic(configFile, configLines, out configWriteError)) {
                 MessageBox.Show("Резервная копия создана и проверена, но конфигурацию сохранить не удалось.\n\n" +
-                    firstArchive + "\n\n" + configError,
+                    firstArchive + "\n\n" + configWriteError,
                     "Ошибка сохранения настроек", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
