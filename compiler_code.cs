@@ -989,11 +989,13 @@ class Program {
             XmlNode userNode = document.SelectSingleNode("//task:Principals/task:Principal/task:UserId", namespaces);
             XmlNode logonNode = document.SelectSingleNode("//task:Principals/task:Principal/task:LogonType", namespaces);
             XmlNode runLevelNode = document.SelectSingleNode("//task:Principals/task:Principal/task:RunLevel", namespaces);
-            if (userNode == null || logonNode == null || runLevelNode == null) return true;
+            if (userNode == null) return true;
 
             string configuredUser = userNode.InnerText.Trim();
-            string configuredLogon = logonNode.InnerText.Trim();
-            string configuredRunLevel = runLevelNode.InnerText.Trim();
+            // Task Scheduler's XML schema defaults omitted values to InteractiveToken
+            // and LeastPrivilege. Preserve those documented safe defaults.
+            string configuredLogon = logonNode == null ? "InteractiveToken" : logonNode.InnerText.Trim();
+            string configuredRunLevel = runLevelNode == null ? "LeastPrivilege" : runLevelNode.InnerText.Trim();
             if (string.Equals(configuredUser, "SYSTEM", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(configuredUser, "NT AUTHORITY\\SYSTEM", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(configuredUser, "S-1-5-18", StringComparison.OrdinalIgnoreCase)) return true;
