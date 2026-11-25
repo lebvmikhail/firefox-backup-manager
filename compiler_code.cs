@@ -461,8 +461,11 @@ class Program {
         Application.EnableVisualStyles();
         string currentDir = AppDomain.CurrentDomain.BaseDirectory;
         string configFile = Path.Combine(currentDir, "config.ini");
+        string executablePath = Path.Combine(currentDir, "Firefox_Backup_Manager.exe");
+        bool protectedInstallLocation = IsProtectedProgramFilesLocation(executablePath);
         // РЕЖИМ 1: Фоновое резервное копирование при старте Windows.
         if (args.Length > 0 && args[0] == "--silent-backup") {
+            if (!protectedInstallLocation) return 8;
             if (!File.Exists(configFile)) return 2;
             string profName = "", profPath = "", backupDir = "", encryptedPass = "";
             bool hasProfileName = false, hasProfilePath = false, hasBackupDir = false, hasPasswordKey = false;
