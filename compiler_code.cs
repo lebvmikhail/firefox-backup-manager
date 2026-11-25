@@ -1118,7 +1118,8 @@ class Program {
         });
     }
 
-    // The private config is stored in LocalAppData and encrypted with DPAPI CurrentUser.    // Any local account that can read a DPAPI LocalMachine blob can decrypt it.
+    // The private config is stored in LocalAppData and encrypted with DPAPI CurrentUser.
+    // Its DACL grants access only to this user, LocalSystem, and local Administrators.
     // The config file therefore relies on a protected DACL as a second boundary.
     static bool EnsurePrivateConfigDirectory(string applicationDirectory,
                                              out string configFile, out string error) {
@@ -1464,11 +1465,6 @@ class Program {
         };
 
         btnSetup.Click += (s, e) => {
-            if (!protectedInstallLocation) {
-                MessageBox.Show("Для задачи SYSTEM переместите Firefox_Backup_Manager.exe в защищённый каталог Program Files, например C:\\Program Files\\Firefox Backup Manager, и запустите его от имени администратора.",
-                    "Требуется установка в Program Files", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
             string appDataRoaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string ffIni = Path.Combine(appDataRoaming, @"Mozilla\Firefox\profiles.ini");
             if (!File.Exists(ffIni)) {
@@ -1619,7 +1615,7 @@ class Program {
                 AppendLogWithRotation(startLog, "[ОШИБКА] Первая копия создана, но задача автозапуска не зарегистрирована: " +
                                       taskError + "\r\n");
                 MessageBox.Show("Первая резервная копия создана и проверена, но настроить автозапуск не удалось.\n\n" +
-                    "Конфигурация сохранена; проверьте права администратора и повторите настройку.\n\n" + taskError,
+                    "Конфигурация сохранена; проверьте права текущей учётной записи на регистрацию задачи и повторите настройку.\n\n" + taskError,
                     "Автозапуск не настроен", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 menuForm.Close();
                 return;
@@ -1628,7 +1624,7 @@ class Program {
             RetainOldBackups(chosenName, chosenBackupDir, startLog);
             AppendLogWithRotation(startLog, "[УСПЕХ] Первая резервная копия проверена; задача автозапуска зарегистрирована.\r\n");
 
-            MessageBox.Show("Настройка завершена!\n\n1. Профиль Firefox определен.\n2. Первая резервная копия создана и проверена.\n3. Задача Планировщика Windows зарегистрирована от имени SYSTEM.",
+            MessageBox.Show("Настройка завершена!\n\n1. Профиль Firefox определен.\n2. Первая резервная копия создана и проверена.\n3. Задача Планировщика Windows зарегистрирована для текущей учётной записи с ограниченными правами.",
                 "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
             menuForm.Close();
         };
