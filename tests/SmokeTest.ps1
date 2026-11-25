@@ -710,8 +710,12 @@ try {
         }
 
         $taskXml = [xml](Export-ScheduledTask -TaskName $taskName -ErrorAction Stop)
-        if ($taskXml.Task.Principals.Principal.LogonType -ne "InteractiveToken" -or
-            $taskXml.Task.Principals.Principal.RunLevel -ne "LeastPrivilege" -or
+        $xmlLogonType = [string]$taskXml.Task.Principals.Principal.LogonType
+        $xmlRunLevel = [string]$taskXml.Task.Principals.Principal.RunLevel
+        if ([string]::IsNullOrWhiteSpace($xmlLogonType)) { $xmlLogonType = "InteractiveToken" }
+        if ([string]::IsNullOrWhiteSpace($xmlRunLevel)) { $xmlRunLevel = "LeastPrivilege" }
+        if ($xmlLogonType -ne "InteractiveToken" -or
+            $xmlRunLevel -ne "LeastPrivilege" -or
             $null -eq $taskXml.Task.Triggers.LogonTrigger) {
             throw "Scheduled task XML does not enforce InteractiveToken, LeastPrivilege, and AtLogOn."
         }
