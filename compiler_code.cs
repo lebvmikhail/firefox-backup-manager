@@ -119,8 +119,28 @@ class Program {
             info.RedirectStandardInput = standardInput != null;
 
             process = new Process(); process.StartInfo = info;
+            const int maxCapturedOutputCharacters = 16 * 1024 * 1024;
+            bool captureTruncated = false;
             DataReceivedEventHandler capture = delegate(object sender, DataReceivedEventArgs e) {
-                if (e.Data != null) lock (captureLock) captured.AppendLine(e.Data);
+                if (e.Data != null) {
+                    lock (captureLock) {
+                        if (captured.Length < maxCapturedOutputCharacters) {
+                            int remaining = maxCapturedOutputCharacters - captured.Length;
+                            if (e.Data.Length <= remaining) captured.AppendLine(e.Data);
+                            else {
+                                captured.Append(e.Data.Substring(0, remaining));
+                                captured.AppendLine();
+                                if (!captureTruncated) {
+                                    captured.AppendLine("[OUTPUT TRUNCATED]");
+                                    captureTruncated = true;
+                                }
+                            }
+                        } else if (!captureTruncated) {
+                            captured.AppendLine("[OUTPUT TRUNCATED]");
+                            captureTruncated = true;
+                        }
+                    }
+                }
             };
             process.OutputDataReceived += capture; process.ErrorDataReceived += capture;
             if (!process.Start()) { error = "Не удалось запустить процесс " + fileName + "."; return false; }
@@ -145,6 +165,13 @@ class Program {
             lock (captureLock) output = captured.ToString();
             return true;
         } catch (Exception ex) {
+            // Do not leave a child archive/utility process running after an I/O failure.
+            try {
+                if (process != null && !process.HasExited) {
+                    process.Kill();
+                    process.WaitForExit();
+                }
+            } catch {}
             error = "Ошибка запуска процесса " + Path.GetFileName(fileName) + ": " + ex.Message;
             lock (captureLock) output = captured.ToString();
             return false;
@@ -227,6 +254,237 @@ class Program {
             return false;
         }
         return true;
+    }
+
+
+    static bool IsSafeArchiveEntryPath(string relativePath, string extractionRoot, out string error) {
+        error = "";
+        if (string.IsNullOrEmpty(relativePath)) {
+            error = "В архиве обнаружен пустой путь.";
+            return false;
+        }
+
+        string normalized = relativePath.Replace('/', '\\');
+        if (Path.IsPathRooted(normalized) || normalized.StartsWith("\\", StringComparison.Ordinal) ||
+            normalized.IndexOf(':') >= 0) {
+            error = "В архиве обнаружен абсолютный путь или альтернативный поток данных.";
+            return false;
+        }
+
+        char[] invalidCharacters = Path.GetInvalidFileNameChars();
+        string[] segments = normalized.Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) {
+            error = "В архиве обнаружен недопустимый путь.";
+            return false;
+        }
+
+        foreach (string segment in segments) {
+            if (segment == "." || segment == ".." || segment.EndsWith(".", StringComparison.Ordinal) ||
+                segment.EndsWith(" ", StringComparison.Ordinal)) {
+                error = "В архиве обнаружен небезопасный компонент пути.";
+                return false;
+            }
+            foreach (char invalidCharacter in invalidCharacters) {
+                if (segment.IndexOf(invalidCharacter) >= 0) {
+                    error = "В архиве обнаружено имя файла, недопустимое в Windows.";
+                    return false;
+                }
+            }
+
+            string deviceName = segment.Split('.')[0].ToUpperInvariant();
+            if (deviceName == "CON" || deviceName == "PRN" || deviceName == "AUX" || deviceName == "NUL" ||
+                (deviceName.Length == 4 && (deviceName.StartsWith("COM", StringComparison.Ordinal) ||
+                                            deviceName.StartsWith("LPT", StringComparison.Ordinal)) &&
+                 deviceName[3] >= '1' && deviceName[3] <= '9')) {
+                error = "В архиве обнаружено зарезервированное имя устройства Windows.";
+                return false;
+            }
+        }
+
+        try {
+            string fullRoot = Path.GetFullPath(extractionRoot);
+            string fullEntry = Path.GetFullPath(Path.Combine(fullRoot, normalized));
+            if (string.Equals(fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                              fullEntry.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                              StringComparison.OrdinalIgnoreCase) ||
+                !IsPathSameOrInside(fullRoot, fullEntry)) {
+                error = "Путь из архива выходит за пределы каталога восстановления.";
+                return false;
+            }
+            return true;
+        } catch (Exception ex) {
+            error = "Не удалось проверить путь в архиве: " + ex.Message;
+            return false;
+        }
+    }
+
+    static bool ValidateArchiveEntries(string zip7, string archivePath, string password,
+                                       string extractionRoot, out string error) {
+        error = "";
+        int exitCode;
+        string output;
+        bool launched = RunProcess(zip7,
+            BuildCommandLine("l", "-slt", "-sccUTF-8", archivePath),
+            2 * 60 * 60 * 1000, password ?? "", out exitCode, out output, out error);
+        if (!launched) return false;
+        if (exitCode != 0) {
+            error = "Не удалось прочитать список содержимого архива (код 7-Zip: " + exitCode + ").";
+            return false;
+        }
+        if (output.IndexOf("[OUTPUT TRUNCATED]", StringComparison.Ordinal) >= 0) {
+            error = "Список архива слишком велик для безопасной проверки путей; восстановление отменено.";
+            return false;
+        }
+
+        bool archivePathSkipped = false;
+        bool isSevenZipArchive = false;
+        int entryCount = 0;
+        string[] lines = output.Split(new char[] { '\\r', '\\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string line in lines) {
+            if (line.StartsWith("Type = ", StringComparison.Ordinal) &&
+                string.Equals(line.Substring("Type = ".Length).Trim(), "7z", StringComparison.OrdinalIgnoreCase))
+                isSevenZipArchive = true;
+
+            if (line.StartsWith("Path = ", StringComparison.Ordinal)) {
+                string entryPath = line.Substring("Path = ".Length);
+                // The first Path field describes the archive itself; later ones are its entries.
+                if (!archivePathSkipped) {
+                    archivePathSkipped = true;
+                    continue;
+                }
+                string pathError;
+                if (!IsSafeArchiveEntryPath(entryPath, extractionRoot, out pathError)) {
+                    error = "Небезопасное содержимое архива: " + pathError;
+                    return false;
+                }
+                entryCount++;
+            }
+
+            if (line.StartsWith("Symbolic Link = ", StringComparison.Ordinal) ||
+                line.StartsWith("Hard Link = ", StringComparison.Ordinal)) {
+                error = "Архив содержит ссылку файловой системы; автоматическое восстановление таких архивов запрещено.";
+                return false;
+            }
+        }
+
+        if (!archivePathSkipped || !isSevenZipArchive || entryCount == 0) {
+            error = "Архив пуст, повреждён или не является архивом формата 7z.";
+            return false;
+        }
+        return true;
+    }
+
+    static bool EnsureNoReparsePoints(string rootPath, out string error) {
+        error = "";
+        try {
+            Stack<string> pending = new Stack<string>();
+            pending.Push(rootPath);
+            while (pending.Count > 0) {
+                string current = pending.Pop();
+                foreach (string entry in Directory.GetFileSystemEntries(current)) {
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0) {
+                        error = "В распакованном содержимом обнаружена ссылка файловой системы: " +
+                                Path.GetFileName(entry);
+                        return false;
+                    }
+                    if ((attributes & FileAttributes.Directory) != 0) pending.Push(entry);
+                }
+            }
+            return true;
+        } catch (Exception ex) {
+            error = "Не удалось проверить распакованные файлы: " + ex.Message;
+            return false;
+        }
+    }
+
+    static bool RestoreBackup(string archivePath, string restoreParent, string password, string logFile,
+                              out string restoredPath, out string error) {
+        restoredPath = "";
+        error = "";
+        string stagingDirectory = "";
+        try {
+            if (string.IsNullOrEmpty(archivePath) || !File.Exists(archivePath)) {
+                error = "Выбранный архив не существует или недоступен.";
+                return false;
+            }
+            if (!string.Equals(Path.GetExtension(archivePath), ".7z", StringComparison.OrdinalIgnoreCase)) {
+                error = "Для восстановления выберите архив с расширением .7z.";
+                return false;
+            }
+            if (string.IsNullOrEmpty(restoreParent) || !Directory.Exists(restoreParent)) {
+                error = "Каталог, в который будет помещено восстановление, не существует или недоступен.";
+                return false;
+            }
+
+            string fullArchivePath = Path.GetFullPath(archivePath);
+            string fullRestoreParent = Path.GetFullPath(restoreParent);
+            string zip7 = Find7Zip();
+            if (string.IsNullOrEmpty(zip7)) {
+                error = "7-Zip не найден. Установите 7-Zip и повторите операцию.";
+                return false;
+            }
+
+            stagingDirectory = Path.Combine(fullRestoreParent, ".ffbm-restore-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stagingDirectory);
+
+            if (!ValidateArchiveEntries(zip7, fullArchivePath, password, stagingDirectory, out error))
+                return false;
+
+            int testExitCode;
+            if (!Run7Zip(zip7, new string[] { "t", "-sccUTF-8", fullArchivePath },
+                         password ?? "", logFile, out testExitCode, out error)) {
+                error = "Проверка архива не пройдена. Проверьте пароль и целостность файла. " + error;
+                return false;
+            }
+
+            int extractExitCode;
+            string[] extractArguments = new string[] {
+                "x", "-y", "-sccUTF-8", "-o" + stagingDirectory, fullArchivePath
+            };
+            if (!Run7Zip(zip7, extractArguments, password ?? "", logFile,
+                         out extractExitCode, out error)) {
+                error = "Не удалось распаковать архив. " + error;
+                return false;
+            }
+
+            if (!File.Exists(Path.Combine(stagingDirectory, "places.sqlite")) &&
+                !File.Exists(Path.Combine(stagingDirectory, "logins.json"))) {
+                error = "В распакованном каталоге не найдены основные файлы профиля Firefox.";
+                return false;
+            }
+
+            string reparseError;
+            if (!EnsureNoReparsePoints(stagingDirectory, out reparseError)) {
+                error = reparseError;
+                return false;
+            }
+
+            string safeBaseName = MakeSafeFileName(Path.GetFileNameWithoutExtension(fullArchivePath));
+            if (safeBaseName.Length > 80) safeBaseName = safeBaseName.Substring(0, 80);
+            string finalDirectory = Path.Combine(fullRestoreParent, safeBaseName + "_restored");
+            if (Directory.Exists(finalDirectory) || File.Exists(finalDirectory)) {
+                finalDirectory = Path.Combine(fullRestoreParent,
+                    safeBaseName + "_restored_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) +
+                    "_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            }
+
+            Directory.Move(stagingDirectory, finalDirectory);
+            stagingDirectory = "";
+            restoredPath = finalDirectory;
+            AppendLogWithRotation(logFile, string.Format(
+                "[{0}] [ВОССТАНОВЛЕНИЕ] Архив проверен и распакован в отдельный каталог: {1}\\r\\n",
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), finalDirectory));
+            return true;
+        } catch (Exception ex) {
+            error = "Ошибка восстановления резервной копии: " + ex.Message;
+            return false;
+        } finally {
+            try {
+                if (!string.IsNullOrEmpty(stagingDirectory) && Directory.Exists(stagingDirectory))
+                    Directory.Delete(stagingDirectory, true);
+            } catch {}
+        }
     }
 
     static bool CreateBackup(string profileName, string profilePath, string backupDir,
@@ -744,7 +1002,7 @@ class Program {
         }
 
         // РЕЖИМ 2: Интерактивное графическое меню настроек
-        Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 260, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
+        Form menuForm = new Form() { Text = "Менеджер бэкапа Firefox", Width = 460, Height = 310, StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false };
         Label lblStatus = new Label() { Left = 20, Top = 20, Width = 400, Height = 60 };
         
         if (File.Exists(configFile)) {
@@ -762,6 +1020,54 @@ class Program {
 
         Button btnSetup = new Button() { Text = "Включить / Настроить авто-бэкап", Left = 20, Top = 100, Width = 400, Height = 35 };
         Button btnDelete = new Button() { Text = "Отключить авто-бэкап и удалить конфиг", Left = 20, Top = 145, Width = 400, Height = 35 };
+        Button btnRestore = new Button() { Text = "Восстановить архив в отдельную папку", Left = 20, Top = 190, Width = 400, Height = 35 };
+
+        btnRestore.Click += (s, e) => {
+            OpenFileDialog archiveDialog = new OpenFileDialog();
+            archiveDialog.Title = "Выберите резервную копию Firefox";
+            archiveDialog.Filter = "Архивы 7-Zip (*.7z)|*.7z";
+            archiveDialog.CheckFileExists = true;
+            archiveDialog.Multiselect = false;
+            if (archiveDialog.ShowDialog() != DialogResult.OK) return;
+
+            FolderBrowserDialog restoreDialog = new FolderBrowserDialog();
+            restoreDialog.Description = "Выберите родительский каталог. Программа создаст внутри него новую папку и не перезапишет существующие данные.";
+            if (restoreDialog.ShowDialog() != DialogResult.OK) return;
+
+            Form restorePasswordForm = new Form() {
+                Text = "Пароль резервной копии",
+                Width = 410, Height = 175, StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false
+            };
+            Label restorePasswordLabel = new Label() {
+                Text = "Пароль архива (для незашифрованной копии оставьте поле пустым):",
+                Left = 15, Top = 15, Width = 365, Height = 35
+            };
+            TextBox restorePasswordBox = new TextBox() {
+                Left = 15, Top = 55, Width = 365, PasswordChar = '*'
+            };
+            Button restorePasswordOk = new Button() {
+                Text = "Продолжить", Left = 270, Top = 95, Width = 110, Height = 30,
+                DialogResult = DialogResult.OK
+            };
+            restorePasswordForm.Controls.AddRange(new Control[] {
+                restorePasswordLabel, restorePasswordBox, restorePasswordOk
+            });
+            restorePasswordForm.AcceptButton = restorePasswordOk;
+            if (restorePasswordForm.ShowDialog() != DialogResult.OK) return;
+
+            string restoreLog = Path.Combine(restoreDialog.SelectedPath, "restore_log.txt");
+            string restoredPath, restoreError;
+            if (RestoreBackup(archiveDialog.FileName, restoreDialog.SelectedPath,
+                              restorePasswordBox.Text, restoreLog, out restoredPath, out restoreError)) {
+                MessageBox.Show("Восстановление завершено. Исходные файлы не изменялись.\n\nКаталог профиля:\n" +
+                    restoredPath + "\n\nПодключите этот каталог через менеджер профилей Firefox после проверки содержимого.",
+                    "Успешное восстановление", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            } else {
+                MessageBox.Show("Восстановление отменено. Исходные файлы не изменялись.\n\n" + restoreError,
+                    "Ошибка восстановления", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
 
         btnSetup.Click += (s, e) => {
             if (!protectedInstallLocation) {
@@ -960,7 +1266,7 @@ class Program {
             menuForm.Close();
         };
 
-        menuForm.Controls.AddRange(new Control[] { lblStatus, btnSetup, btnDelete });
+        menuForm.Controls.AddRange(new Control[] { lblStatus, btnSetup, btnDelete, btnRestore });
         Application.Run(menuForm);
         return 0;
     }
